@@ -53,6 +53,25 @@ RUN --network=none go build \
     -ldflags "-X github.com/Silo-Server/silo-server/internal/buildinfo.revisionOverride=${BUILD_REVISION} -X github.com/Silo-Server/silo-server/internal/buildinfo.dirtyOverride=${BUILD_DIRTY} -X github.com/Silo-Server/silo-server/internal/buildinfo.buildNumberOverride=${BUILD_NUMBER} -X github.com/Silo-Server/silo-server/internal/buildinfo.builtAtOverride=${BUILD_DATE}" \
     -o /silo ./cmd/silo/
 
+# The Roku edition bundles the tested converter on each playback executor.
+# Verify release archives before installing the executable or its license.
+FROM debian:trixie-slim AS dolby_vision_tool
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /tool
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) target=x86_64-unknown-linux-musl; checksum=1844258e13c26607b32224bf1fa82b595d3b35949f5467405fda560daad32b3f ;; \
+      arm64) target=aarch64-unknown-linux-musl; checksum=b4f22a7db56954efe4ed8d02276d0f991799e84602f3584711be6c9df950cb15 ;; \
+      *) echo "Unsupported dovi_tool architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 3 "https://github.com/quietvoid/dovi_tool/releases/download/2.3.4/dovi_tool-2.3.4-${target}.tar.gz" -o tool.tar.gz; \
+    printf '%s  tool.tar.gz\n' "$checksum" | sha256sum -c -; \
+    tar -xzf tool.tar.gz; \
+    test -f dovi_tool; \
+    chmod 755 dovi_tool
+
 # Stage 3: Runtime
 FROM debian:trixie-slim
 ARG TARGETARCH
@@ -92,6 +111,8 @@ COPY --from=jellyfin_web_node /usr/local/bin/node /usr/local/bin/node
 COPY --from=jellyfin_web_node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+COPY --from=dolby_vision_tool /tool/dovi_tool /usr/local/bin/dovi_tool
+COPY licenses/dovi_tool-MIT.txt /usr/share/licenses/dovi_tool/LICENSE
 COPY --from=build /silo /usr/local/bin/silo
 EXPOSE 8080 8096 13378
 # Silo runs database migrations before its HTTP listener starts, and an

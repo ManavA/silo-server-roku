@@ -1,3 +1,15 @@
+> Roku fork releases use `vMAJOR.MINOR.PATCH-roku.N` and are published from
+> `ManavA/silo-server-roku`. They are independent prereleases, not upstream build
+> numbers. The `Roku release images` workflow verifies the tag matches the selected
+> main commit, builds native amd64/arm64 images with bundled dovi_tool and its
+> license, checks the runtime tools, and only then merges the image manifests.
+> Version, full commit SHA and `roku` tags identify the result. Portable images
+> are retained as workflow artifacts for attaching to the matching GitHub Release.
+> `packaging/roku/` contains the standalone Compose bundle templates; setup and
+> upgrade instructions belong in that release. Inherited upstream automation is
+> retained under `.github/upstream-workflows/` and does not run in this fork.
+> The original upstream versioning policy follows for reference.
+
 # Release versioning
 
 Silo uses GitHub Releases as the public record of shipped versions and their

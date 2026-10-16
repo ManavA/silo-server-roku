@@ -1,0 +1,130 @@
+name: Roku release images
+run-name: Build ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing Roku prerelease tag (v0.1.0-roku.1)
+        required: true
+        type: string
+
+concurrency:
+  group: roku-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/manava/silo-server-roku
+
+jobs:
+  identity:
+    runs-on: ubuntu-latest
+    if: github.repository == 'ManavA/silo-server-roku' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify immutable release source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-roku\.[1-9][0-9]*$ ]]; then
+            echo '::error::Expected a Roku prerelease tag.'
+            exit 1
+          fi
+          test "$(git rev-parse "refs/tags/$VERSION^{commit}")" = "$GITHUB_SHA"
+
+  build:
+    needs: identity
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build native runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: ${{ env.IMAGE }}:${{ inputs.version }}-${{ matrix.arch }}
+          build-args: |
+            BUILD_REVISION=${{ github.sha }}
+            BUILD_DIRTY=false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.title=Silo Roku Server
+          cache-from: type=gha,scope=roku-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=roku-${{ matrix.arch }}
+      - name: Check packaged tools
+        env:
+          VERSION: ${{ inputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker run --rm --entrypoint /bin/sh "$IMAGE:$VERSION-$ARCH" -ec '
+            dovi_tool --version | grep -F "2.3.4"
+            /usr/lib/jellyfin-ffmpeg/ffmpeg -version
+            /usr/lib/jellyfin-ffmpeg/ffprobe -version
+            test -s /usr/share/licenses/dovi_tool/LICENSE
+          '
+      - name: Publish architecture image
+        env:
+          VERSION: ${{ inputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: docker push "$IMAGE:$VERSION-$ARCH"
+      - name: Export portable image
+        env:
+          VERSION: ${{ inputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p release
+          docker image save "$IMAGE:$VERSION-$ARCH" | zstd -T0 -3 > "release/silo-server-roku-$VERSION-linux-$ARCH.tar.zst"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.arch }}
+          path: release/*.tar.zst
+          compression-level: 0
+          retention-days: 7
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish multi-platform release
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          docker buildx imagetools create \
+            -t "$IMAGE:$VERSION" -t "$IMAGE:roku" -t "$IMAGE:${GITHUB_SHA}" \
+            "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
+          docker buildx imagetools inspect "$IMAGE:$VERSION"

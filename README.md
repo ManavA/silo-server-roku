@@ -1,3 +1,12 @@
+> **Silo Roku Server** is an independently maintained fork of
+> [Silo Server](https://github.com/Silo-Server/silo-server), based on upstream
+> build 1456 (`48ae561d`). It adds negotiated TS HLS, separate-audio HLS and
+> optional DV7-to-DV8.1 conversion for compatible Roku clients. The image includes
+> dovi_tool 2.3.4; conversion is still checked at runtime and falls back safely.
+> Start with the [Roku releases](https://github.com/ManavA/silo-server-roku/releases)
+> for runnable images, Compose files, setup and upgrade notes. This fork is not
+> an official upstream release. Original project documentation follows below.
+
 <p align="center">
   <img src="assets/icon.png" alt="Silo logo" width="112" height="112">
 </p>
