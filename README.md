@@ -18,9 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Silo-Server/silo-server/releases"><img alt="Latest GitHub release" src="https://img.shields.io/github/v/release/Silo-Server/silo-server?include_prereleases&amp;sort=semver&amp;display_name=tag&amp;style=flat-square&amp;label=release"></a>
-  <a href="https://github.com/orgs/Silo-Server/packages/container/package/silo-server"><img alt="Container image on GHCR" src="https://img.shields.io/badge/container-GHCR-2496ED?style=flat-square&amp;logo=docker&amp;logoColor=white"></a>
-  <a href="https://github.com/Silo-Server/silo-server/actions/workflows/ci.yml"><img alt="Continuous integration" src="https://img.shields.io/github/actions/workflow/status/Silo-Server/silo-server/ci.yml?branch=main&amp;style=flat-square&amp;label=CI"></a>
+  <a href="https://github.com/ManavA/silo-server-roku/releases"><img alt="Latest GitHub release" src="https://img.shields.io/github/v/release/ManavA/silo-server-roku?include_prereleases&amp;sort=semver&amp;display_name=tag&amp;style=flat-square&amp;label=release"></a>
+  <a href="https://github.com/users/ManavA/packages/container/package/silo-server-roku"><img alt="Container image on GHCR" src="https://img.shields.io/badge/container-GHCR-2496ED?style=flat-square&amp;logo=docker&amp;logoColor=white"></a>
+  <a href="https://github.com/ManavA/silo-server-roku/actions/workflows/roku-release.yml"><img alt="Continuous integration" src="https://img.shields.io/github/actions/workflow/status/ManavA/silo-server-roku/roku-release.yml?branch=roku&amp;style=flat-square&amp;label=CI"></a>
   <img alt="Go 1.26" src="https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&amp;logo=go&amp;logoColor=white">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-149ECA?style=flat-square&amp;logo=react&amp;logoColor=white">
   <a href="LICENSE"><img alt="AGPL-3.0-or-later license" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-555555?style=flat-square"></a>
@@ -98,8 +98,8 @@ Requires Docker Compose 2.24 or newer. The default stack runs Silo, PostgreSQL
 with pgvector, and Redis.
 
 ```sh
-git clone https://github.com/Silo-Server/silo-server.git
-cd silo-server
+git clone https://github.com/ManavA/silo-server-roku.git
+cd silo-server-roku
 cp .env.example .env
 chmod 600 .env
 printf '\nPOSTGRES_PASSWORD=%s\nSECRET_KEY=%s\n' \
@@ -121,10 +121,12 @@ transcode nodes, PostgreSQL tuning, backups, and updates.
 
 ## Builds and releases
 
-Until the first release, default-branch images carry an ordered `build-N` tag
-and a short commit SHA alongside `latest`. Build numbers order published images;
-they are not release versions. [Release versioning](docs/release-versioning.md)
-defines each tag and the SemVer contract.
+Roku prereleases provide versioned amd64/arm64 images and a standalone Compose
+bundle. Use the matching [GitHub Release](https://github.com/ManavA/silo-server-roku/releases)
+for setup, supported upgrade paths and device limits. The `roku` image tag moves
+with releases; pin a version or digest for repeatable deployments.
+[Release versioning](docs/release-versioning.md) describes the fork process and
+retains the original upstream policy for reference.
 
 ## Documentation
 
