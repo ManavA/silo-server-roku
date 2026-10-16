@@ -28,7 +28,7 @@ func appendSeparateAudioHLSArgs(args []string, opts TranscodeOpts) []string {
 	if opts.StartSegmentNumber > 0 {
 		args = append(args, "-start_number", strconv.Itoa(opts.StartSegmentNumber))
 	}
-	return append(args, filepath.Join(opts.OutputDir, "audio.m3u8"))
+	return append(args, filepath.Join(opts.OutputDir, hlsAudioManifestFilename))
 }
 
 // buildSeparateAudioManifest serves both renditions under the existing manifest
@@ -45,7 +45,7 @@ func (s *TranscodeSession) buildSeparateAudioManifest(segPrefix, rawQuery string
 	case "":
 		query.Set("rendition", hlsAudioRendition)
 		audioURI := "master.m3u8?" + query.Encode()
-		query.Set("rendition", "video")
+		query.Set("rendition", hlsVideoRendition)
 		videoURI := "master.m3u8?" + query.Encode()
 		attributes := ""
 		if _, audioCodec, ok := strings.Cut(opts.HLSCodecs, ","); ok {
@@ -59,14 +59,14 @@ func (s *TranscodeSession) buildSeparateAudioManifest(segPrefix, rawQuery string
 			attributes += ",VIDEO-RANGE=" + opts.HLSVideoRange
 		}
 		return []byte(fmt.Sprintf("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Selected audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"%s\"\n#EXT-X-STREAM-INF:BANDWIDTH=%d,AUDIO=\"audio\"%s\n%s\n", audioURI, max(1, opts.TargetBitrateKbps*1000), attributes, videoURI)), nil
-	case "video", hlsAudioRendition:
+	case hlsVideoRendition, hlsAudioRendition:
 		name := hlsVideoManifestFilename
 		if rendition == hlsAudioRendition {
-			name = "audio.m3u8"
+			name = hlsAudioManifestFilename
 		}
 		var manifest []byte
 		var err error
-		if rendition == "video" {
+		if rendition == hlsVideoRendition {
 			manifest, err = s.GetManifest()
 		} else {
 			manifest, err = os.ReadFile(filepath.Join(s.outputDir, name))
@@ -103,7 +103,7 @@ func validateSeparateAudioHLS(opts TranscodeOpts) error {
 		strings.ContainsFunc(opts.HLSCodecs, func(r rune) bool {
 			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '.' && r != ',' && r != '-'
 		}) ||
-		opts.HLSVideoRange != "" && opts.HLSVideoRange != "SDR" && opts.HLSVideoRange != "PQ" && opts.HLSVideoRange != "HLG" {
+		opts.HLSVideoRange != "" && opts.HLSVideoRange != hlsVideoRangeSDR && opts.HLSVideoRange != hlsVideoRangePQ && opts.HLSVideoRange != hlsVideoRangeHLG {
 		return fmt.Errorf("unsupported separate-audio HLS recipe")
 	}
 	return nil
@@ -141,7 +141,7 @@ func prepareSeparateAudioTimestampOffset(ctx context.Context, opts TranscodeOpts
 	audioOrdinal := 0
 	audioRate := 0.0
 	for _, stream := range report.Streams {
-		if stream.Kind == "video" && videoIndex < 0 {
+		if stream.Kind == hlsVideoRendition && videoIndex < 0 {
 			videoIndex = stream.Index
 		}
 		if stream.Kind == hlsAudioRendition {
@@ -159,7 +159,7 @@ func prepareSeparateAudioTimestampOffset(ctx context.Context, opts TranscodeOpts
 	}
 	// AAC's native encoder emits one frame of priming before decoded sound.
 	// Include it in the common lift so the TS muxer does not shift audio alone.
-	if codec := strings.ToLower(strings.TrimSpace(opts.TargetCodecAudio)); codec == "aac" || codec == "" {
+	if codec := strings.ToLower(strings.TrimSpace(opts.TargetCodecAudio)); codec == audioCodecAACV3 || codec == "" {
 		if audioRate < 8000 || audioRate > 192000 || math.IsNaN(audioRate) || math.IsInf(audioRate, 0) {
 			return opts, fmt.Errorf("unsupported separate-audio sample rate")
 		}

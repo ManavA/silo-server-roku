@@ -9,6 +9,8 @@ const (
 	hlsInitFilename          = "init.mp4"
 	hlsVideoManifestFilename = "stream.m3u8"
 	hlsAudioRendition        = "audio"
+	hlsVideoRendition        = "video"
+	hlsAudioManifestFilename = "audio.m3u8"
 	hlsVideoRangeSDR         = "SDR"
 	hlsVideoRangePQ          = "PQ"
 	hlsVideoRangeHLG         = "HLG"
