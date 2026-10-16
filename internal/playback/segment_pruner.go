@@ -194,6 +194,13 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 	var freedBytes int64
 	for _, candidate := range candidates {
 		info, err := os.Stat(candidate.path)
+		if errors.Is(err, os.ErrNotExist) && opts.DV7ToDV81 {
+			rawPath := filepath.Join(outputDir, dv7SourceDirectory, filepath.Base(candidate.path))
+			info, err = os.Stat(rawPath)
+			if err == nil {
+				candidate.path = rawPath
+			}
+		}
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -228,6 +235,18 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 			return
 		}
 		removeErr := os.Remove(candidate.path)
+		rawFreed := int64(0)
+		if removeErr == nil && opts.DV7ToDV81 && filepath.Dir(candidate.path) == outputDir {
+			rawPath := filepath.Join(outputDir, dv7SourceDirectory, filepath.Base(candidate.path))
+			rawInfo, statErr := os.Stat(rawPath)
+			rawErr := os.Remove(rawPath)
+			if rawErr == nil && statErr == nil {
+				rawFreed = rawInfo.Size()
+			}
+			if rawErr != nil && !errors.Is(rawErr, os.ErrNotExist) {
+				removeErr = rawErr
+			}
+		}
 		s.mu.Unlock()
 		if removeErr != nil {
 			if !errors.Is(removeErr, os.ErrNotExist) {
@@ -241,7 +260,7 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 			continue
 		}
 		removed++
-		freedBytes += info.Size()
+		freedBytes += info.Size() + rawFreed
 	}
 	if pruneBeforeStart && (moreCandidates || retryAfter > 0) {
 		processedFloor = fromFloor

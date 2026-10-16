@@ -66,6 +66,10 @@ type TranscodeStartRequest struct {
 	VideoBitstreamFilter       string                 `json:"video_bitstream_filter,omitempty"`
 	VideoSampleEntry           string                 `json:"video_sample_entry,omitempty"`
 	CopyVideoMPEGTS            bool                   `json:"copy_video_mpegts,omitempty"`
+	SeparateAudioHLS           bool                   `json:"separate_audio_hls,omitempty"`
+	DV7ToDV81                  bool                   `json:"dv7_to_dv81,omitempty"`
+	HLSCodecs                  string                 `json:"hls_codecs,omitempty"`
+	HLSVideoRange              string                 `json:"hls_video_range,omitempty"`
 	KeyframePlaylist           bool                   `json:"keyframe_playlist,omitempty"`
 	SeekSeconds                float64                `json:"seek_seconds"`
 	StreamOriginSeconds        float64                `json:"stream_origin_seconds,omitempty"`
@@ -164,7 +168,7 @@ func validateCopyFMP4RecipeRequest(req TranscodeStartRequest) error {
 	if !isCopy && req.CopyFMP4RecipeVersion == "" {
 		return nil
 	}
-	if !isCopy || req.CopyFMP4RecipeVersion != playback.CopyFMP4RecipeVersion {
+	if !isCopy || req.CopyFMP4RecipeVersion != playback.CopyHLSRecipeVersion(req.SeparateAudioHLS, req.DV7ToDV81) {
 		return fmt.Errorf("%w: target_codec=%q recipe_version=%q",
 			ErrCopyFMP4RecipeAttestationMismatch, req.TargetCodecVideo, req.CopyFMP4RecipeVersion)
 	}
@@ -1679,6 +1683,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		VideoBitstreamFilter:       req.VideoBitstreamFilter,
 		VideoSampleEntry:           req.VideoSampleEntry,
 		CopyVideoMPEGTS:            req.CopyVideoMPEGTS,
+		SeparateAudioHLS:           req.SeparateAudioHLS,
+		DV7ToDV81:                  req.DV7ToDV81,
+		HLSCodecs:                  req.HLSCodecs,
+		HLSVideoRange:              req.HLSVideoRange,
 		KeyframePlaylist:           req.KeyframePlaylist,
 		SeekSeconds:                req.SeekSeconds,
 		StreamOriginSeconds:        req.StreamOriginSeconds,
@@ -2819,9 +2827,7 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(sw, r, segmentLease.Info.Name(), segmentLease.Info.ModTime(), segmentLease.File)
 	if !proxied && r.Method == http.MethodGet &&
 		sw.CompletedFullResponse(segmentLease.Info.Size()) {
-		if segmentNumber, parseErr := playback.ParseSegmentNumber(name); parseErr == nil {
-			session.ReportSegmentDownloadedForGeneration(segmentNumber, segmentLease.Generation)
-		}
+		session.ReportMediaSegmentDownloadedForGeneration(name, segmentLease.Generation)
 	}
 }
 
@@ -2832,8 +2838,9 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSegmentDownloaded(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
 	name := chi.URLParam(r, "name")
-	segmentNumber, err := playback.ParseSegmentNumber(name)
-	if err != nil {
+	_, videoErr := playback.ParseSegmentNumber(name)
+	_, audioErr := playback.ParseAudioSegmentNumber(name)
+	if videoErr != nil && audioErr != nil {
 		http.Error(w, "invalid segment", http.StatusBadRequest)
 		return
 	}
@@ -2848,7 +2855,7 @@ func (s *Server) handleSegmentDownloaded(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
-	session.ReportSegmentDownloadedForGenerationToken(segmentNumber, generationToken)
+	session.ReportMediaSegmentDownloadedForGenerationToken(name, generationToken)
 	w.WriteHeader(http.StatusNoContent)
 }
 

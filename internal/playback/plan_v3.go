@@ -354,6 +354,10 @@ func PlanPlaybackV3(input PlannerInputV3) (result PlannerResultV3) {
 		dvStripEligibleProgressive = false
 		dvStripEligibleHLS = false
 	}
+	serverDV81, serverDV81Eligible := PlannerResultV3{}, false
+	if videoOK && !quality.RequiresTranscode && hlsRemuxSubtitleOK {
+		serverDV81, serverDV81Eligible = planServerDV7ToDV81V3(input, file, source)
+	}
 	clientDV81Eligible := canClientTransformDV7ToDV81V3(source, input.Request)
 	clientHDR10Eligible := canClientTransformDV7ToHDR10V3(source, input.Request)
 	// With the server strip gone, a client that cannot take the source range
@@ -366,7 +370,7 @@ func PlanPlaybackV3(input PlannerInputV3) (result PlannerResultV3) {
 	// instead — the client is then told the actual cause, a source whose Dolby
 	// Vision metadata cannot be removed, rather than a generic HDR message that
 	// sends the user looking for a missing encoder.
-	if dvStripUnsupportedBySource && !originalRangeOK && !clientDV81Eligible && !clientHDR10Eligible {
+	if dvStripUnsupportedBySource && !originalRangeOK && !clientDV81Eligible && !clientHDR10Eligible && !serverDV81Eligible {
 		_, _, _, _, toneMapEligible := toneMapRecipeV3(input, source)
 		if !toneMapEligible || !videoTranscodeExecutableV3(input, source) {
 			return terminalPlannerResultV3(TerminalDVConversionUnsupportedV3,
@@ -434,7 +438,7 @@ func PlanPlaybackV3(input PlannerInputV3) (result PlannerResultV3) {
 	// degradation warning instead of refusing playback. Explicit user-selected
 	// rungs keep the existing terminals.
 	if input.ServerBitrateCapKbps == 0 && quality.RequiresTranscode && !quality.ExplicitRung && (originalSubtitleOK || remuxSubtitleOK || hlsRemuxSubtitleOK) && videoOK &&
-		(originalRangeOK || dvStripEligible || clientDV81Eligible || clientHDR10Eligible) &&
+		(originalRangeOK || dvStripEligible || clientDV81Eligible || clientHDR10Eligible || serverDV81Eligible) &&
 		!videoTranscodeExecutableV3(input, source) {
 		warnings := append(quality.Warnings, DegradationWarningV3{
 			Code:    "quality_reduction_unavailable",
@@ -446,7 +450,7 @@ func PlanPlaybackV3(input PlannerInputV3) (result PlannerResultV3) {
 	base.DegradationWarnings = append(base.DegradationWarnings, quality.Warnings...)
 
 	if quality.RequiresTranscode || !videoOK ||
-		(!originalRangeOK && !dvStripEligible && !clientDV81Eligible && !clientHDR10Eligible) ||
+		(!originalRangeOK && !dvStripEligible && !clientDV81Eligible && !clientHDR10Eligible && !serverDV81Eligible) ||
 		(!originalSubtitleOK && !remuxSubtitleOK && !hlsRemuxSubtitleOK) {
 		reasonOverride := ""
 		if !quality.RequiresTranscode && !videoOK && videoEvidenceInsufficient {
@@ -567,6 +571,10 @@ func PlanPlaybackV3(input PlannerInputV3) (result PlannerResultV3) {
 		if deliverySupportsPlanV3(input.Request, DeliveryClassOriginalHTTPV3, plan) && !planAttemptedV3(plan, input.Request.ClientPlaybackContext.Output.OutputContextID, input.AttemptedKeys) {
 			return PlannerResultV3{Plan: &plan, PlayMethod: PlayDirect, SubtitleTrackIndex: subtitle.SelectedIndex, SubtitleTransportTrackIndex: subtitle.TransportIndex, SubtitleCodec: subtitle.Codec, DownloadedSubtitleID: subtitle.DownloadedSubtitleID}
 		}
+	}
+
+	if serverDV81Eligible {
+		return serverDV81
 	}
 
 	// A progressive remux maps only the base-layer video stream, so dual-layer
@@ -706,11 +714,26 @@ func PlanPlaybackV3(input PlannerInputV3) (result PlannerResultV3) {
 					hlsAudioConversionUnavailable = "The HLS route requires the validated AAC conversion toolchain."
 				}
 			}
+
+			packaging := nativeHLSPackagingV3(input.Request)
+			if packaging == TransformationHLSSeparateAudioV3 && noAudioTrack {
+				hlsRouteOK = false
+			}
+			if packaging != "" && (!input.hlsRemuxRegistry().Available(packaging) || packaging == TransformationHLSMPEGTSV3 && remuxBase.EffectiveRecipe.DynamicRange == DynamicRangeDolbyVisionV3) {
+				hlsRouteOK = false
+			}
 			if hlsRouteOK {
 				plan := cloneRemuxPlanCandidateV3(remuxBase)
 				plan.Delivery = DeliveryRemuxHLSV3
 				plan.Stream = StreamV3{Protocol: StreamHLSV3, Container: containerHLSV3, MIMEType: "application/vnd.apple.mpegurl", Headers: map[string]string{}, HeaderRefresh: HeaderRefreshNoneV3}
 				plan.EffectiveRecipe.VideoSampleEntry = hlsVideoSampleEntryV3(source, input.Request, dvStrip)
+
+				if packaging != "" {
+					if packaging == TransformationHLSMPEGTSV3 {
+						plan.EffectiveRecipe.VideoSampleEntry = ""
+					}
+					plan.Transformations = append(plan.Transformations, TransformationV3{Name: packaging, Executor: ExecutorServerV3, RecipeVersion: "1"})
+				}
 				hlsAudioChannels := 0
 				if hlsTranscodeAudio && !hlsQuirkConvertsAudio {
 					hlsAudioChannels = hlsAACChannels

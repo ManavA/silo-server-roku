@@ -99,6 +99,9 @@ const (
 	ClaimClientDV8BaseLayerFallbackV3 = "client_dv8_base_layer_fallback_v1"
 	ClientDV8HDR10PlusSanitizerV3     = "client_dv8_hdr10plus_sanitizer_v1"
 	ClientNativeHLSPlaybackV3         = "native_hls_playback_v1"
+	ClientNativeHLSMPEGTSV3           = "native_hls_mpegts_v1"
+	ClientNativeHLSSeparateAudioV3    = "native_hls_separate_audio_v1"
+	FeatureServerDV7ToDV81V3          = "server_dv7_to_dv81_v1"
 	ClientPostResumeRecoveryV3        = "client_post_resume_video_recovery_v1"
 	ClientSurfaceRecoveryV3           = "client_surface_recovery_v1"
 	DeviceQuirkRegistryRevisionV3     = "2026-07-13.1"
@@ -110,6 +113,7 @@ const (
 const (
 	TransportFeatureProgressiveRemuxExecutionV1 = "progressive_remux_execution_v1"
 	TransportFeatureProgressiveRemuxRelayV1     = "progressive_remux_relay_v1"
+	TransportFeatureNativeHLSRenditionsRelayV1  = "native_hls_renditions_relay_v1"
 	// Theme audio markers: a proxy that serves /stream/theme, and a transcode
 	// node that approves theme files as progressive AAC inputs.
 	TransportFeatureThemeAudioEgressV1    = "theme_audio_egress_v1"
@@ -191,7 +195,7 @@ func ServerFeaturesV3() []string {
 // advertises and honors only on /api/v2. They postdate the /api/v1 freeze, so
 // the frozen surface neither advertises nor negotiates them.
 func NativeServerFeaturesV3() []string {
-	return append(ServerFeaturesV3(), FeatureSubripSidecarV3, FeatureMarkerThumbnailsV3)
+	return append(ServerFeaturesV3(), FeatureSubripSidecarV3, FeatureMarkerThumbnailsV3, ClientNativeHLSMPEGTSV3, ClientNativeHLSSeparateAudioV3, FeatureServerDV7ToDV81V3)
 }
 
 // WithoutFeatureV3 returns features with every spelling of feature removed.
@@ -277,11 +281,17 @@ const (
 // Server transformation names. A plan names the transformations its serving
 // executor must run; the registry keys availability by the same names.
 const (
-	TransformationAudioToAACV3      = "audio_to_aac"
-	TransformationVideoToH264V3     = "video_to_h264"
-	TransformationVideoToHEVCV3     = "video_to_hevc"
-	TransformationServerDV7HDR10V3  = "server_dv7_to_hdr10"
-	TransformationHDRToSDRToneMapV3 = "hdr_to_sdr_tonemap"
+	TransformationHLSSeparateAudioV3              = "hls_separate_audio"
+	TransformationHLSSeparateAudioRecipeVersionV3 = "1"
+	TransformationHLSMPEGTSV3                     = "hls_mpegts"
+	TransformationHLSMPEGTSRecipeVersionV3        = "1"
+	TransformationAudioToAACV3                    = "audio_to_aac"
+	TransformationVideoToH264V3                   = "video_to_h264"
+	TransformationVideoToHEVCV3                   = "video_to_hevc"
+	TransformationServerDV7HDR10V3                = "server_dv7_to_hdr10"
+	TransformationServerDV7DV81V3                 = "server_dv7_to_dv81"
+	TransformationServerDV7DV81RecipeVersionV3    = "1"
+	TransformationHDRToSDRToneMapV3               = "hdr_to_sdr_tonemap"
 
 	TransformationVideoToH264RecipeVersionV3     = "2"
 	TransformationVideoToHEVCRecipeVersionV3     = "1"

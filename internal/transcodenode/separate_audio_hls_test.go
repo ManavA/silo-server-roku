@@ -1,0 +1,59 @@
+package transcodenode
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/transcodeproxy"
+)
+
+func TestSeparateAudioHLSAcknowledgesItsOwnRendition(t *testing.T) {
+	tools := t.TempDir()
+	ffmpeg := filepath.Join(tools, "ffmpeg")
+	if err := os.WriteFile(ffmpeg, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	probe := `#!/bin/sh
+cat <<'JSON'
+{"packets":[{"stream_index":0,"dts_time":"0"},{"stream_index":1,"dts_time":"0"}],"streams":[{"index":0,"codec_type":"video"},{"index":1,"codec_type":"audio"}],"format":{"start_time":"0"}}
+JSON
+`
+	if err := os.WriteFile(filepath.Join(tools, "ffprobe"), []byte(probe), 0700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	session, err := playback.StartTranscode(t.Context(), playback.TranscodeOpts{SessionID: "separate-audio", InputPath: "fixture.mkv", OutputDir: dir, FFmpegPath: ffmpeg, TargetCodecVideo: "copy", TargetCodecAudio: "copy", SeparateAudioHLS: true, SegmentDuration: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	server := newTestServer(t)
+	server.sessions["separate-audio"] = session
+	server.lastAccess["separate-audio"] = time.Now()
+	const name = "audio_00007.ts"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("audio"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	request := withNodeRouteParams(httptest.NewRequest(http.MethodGet, "/transcode/separate-audio/segment/"+name, nil), map[string]string{"session_id": "separate-audio", "name": name})
+	request.Header.Set(transcodeproxy.RequestHeader, "1")
+	response := httptest.NewRecorder()
+	server.handleSegment(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("audio segment status = %d", response.Code)
+	}
+	ack := withNodeRouteParams(httptest.NewRequest(http.MethodPost, "/transcode/separate-audio/segment/"+name+"/downloaded", nil), map[string]string{"session_id": "separate-audio", "name": name})
+	ack.Header.Set(transcodeproxy.GenerationHeader, response.Header().Get(transcodeproxy.GenerationHeader))
+	acknowledged := httptest.NewRecorder()
+	server.handleSegmentDownloaded(acknowledged, ack)
+	if acknowledged.Code != http.StatusNoContent {
+		t.Fatalf("audio acknowledgement status = %d", acknowledged.Code)
+	}
+	if session.LastRequestedSegment() != 0 {
+		t.Fatal("audio acknowledgement advanced the video ordinal")
+	}
+}

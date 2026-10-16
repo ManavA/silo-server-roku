@@ -62,7 +62,12 @@ func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegP
 	downmixRecipeErr, downmixRecipeContextErr := probeAudioRecipeFilterV3(ctx, ffmpegPath, "5.1", stereoDownmixBoostFilterV3)
 	hevcRecipeErr, hevcRecipeContextErr := probeHEVCRecipeV3(ctx, ffmpegPath, encoders)
 	_, ffmpegErr := exec.LookPath(ffmpegPath)
+	_, ffprobeErr := exec.LookPath(ffprobePathFromFFmpeg(ffmpegPath))
+	_, dv81Available := probeDV7ToDV81ToolchainV3(ctx)
 	registry := NewTransformationRegistryV3([]TransformationSpecV3{
+		{Name: TransformationServerDV7DV81V3, RecipeVersion: TransformationServerDV7DV81RecipeVersionV3, Available: ffmpegErr == nil && ffprobeErr == nil && dv81Available, RequiredCapability: "dovi_tool:mode2+mp4_fragment_timing_v1", PromisedDynamicRange: DynamicRangeDolbyVisionV3, ValidatedClaims: []string{ClaimHDR10BaseLayerPreservedV3, ClaimEnhancementLayerDiscardedV3, "dolby_vision_profile_8_1"}, TerminalReason: TerminalDVConversionUnsupportedV3},
+		{Name: TransformationHLSSeparateAudioV3, RecipeVersion: TransformationHLSSeparateAudioRecipeVersionV3, Available: ffmpegErr == nil && ffprobeErr == nil, RequiredCapability: "ffmpeg_muxer:hls+mpegts"},
+		{Name: TransformationHLSMPEGTSV3, RecipeVersion: TransformationHLSMPEGTSRecipeVersionV3, Available: ffmpegErr == nil, RequiredCapability: "ffmpeg_muxer:mpegts"},
 		{Name: TransformationServerDV7HDR10V3, RecipeVersion: TransformationServerDV7HDR10RecipeVersionV3, Available: bytes.Contains(bsfs, []byte("dovi_rpu")) && bytes.Contains(bsfs, []byte("filter_units")), RequiredCapability: "ffmpeg_bsf:dovi_rpu+filter_units", PromisedDynamicRange: DynamicRangeHDR10V3, ValidatedClaims: DV7ToHDR10ClaimsV3(), TerminalReason: TerminalDVConversionUnsupportedV3},
 		{Name: TransformationAudioToAACV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3, Available: ffmpegErr == nil && bytes.Contains(encoders, []byte(" aac ")) && normalizeRecipeErr == nil && downmixRecipeErr == nil, RequiredCapability: "ffmpeg_encoder:aac+ffmpeg_filter_smoke:timestamp_normalization_and_stereo_downmix_v4", ValidatedClaims: []string{ClaimAudioDecodeV3}, TerminalReason: TerminalAudioConversionUnsupportedV3},
 		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: ffmpegErr == nil && h264EncoderAvailableV3(encoders), RequiredCapability: "ffmpeg_encoder:h264", PromisedDynamicRange: DynamicRangeSDRV3, ValidatedClaims: []string{ClaimH264DecodeV3}, TerminalReason: TerminalVideoConversionUnsupportedV3},
