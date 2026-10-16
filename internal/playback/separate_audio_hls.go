@@ -43,13 +43,13 @@ func (s *TranscodeSession) buildSeparateAudioManifest(segPrefix, rawQuery string
 	opts := s.Opts()
 	switch rendition {
 	case "":
-		query.Set("rendition", "audio")
+		query.Set("rendition", hlsAudioRendition)
 		audioURI := "master.m3u8?" + query.Encode()
 		query.Set("rendition", "video")
 		videoURI := "master.m3u8?" + query.Encode()
 		attributes := ""
 		if _, audioCodec, ok := strings.Cut(opts.HLSCodecs, ","); ok {
-			if init, err := readBoundedHLSFile(filepath.Join(s.outputDir, "init.mp4"), 2<<20); err == nil {
+			if init, err := readBoundedHLSFile(filepath.Join(s.outputDir, hlsInitFilename), 2<<20); err == nil {
 				if videoCodec := nativeHLSVideoCodec(init); videoCodec != "" {
 					attributes += fmt.Sprintf(",CODECS=%q", videoCodec+","+audioCodec)
 				}
@@ -59,9 +59,9 @@ func (s *TranscodeSession) buildSeparateAudioManifest(segPrefix, rawQuery string
 			attributes += ",VIDEO-RANGE=" + opts.HLSVideoRange
 		}
 		return []byte(fmt.Sprintf("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Selected audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"%s\"\n#EXT-X-STREAM-INF:BANDWIDTH=%d,AUDIO=\"audio\"%s\n%s\n", audioURI, max(1, opts.TargetBitrateKbps*1000), attributes, videoURI)), nil
-	case "video", "audio":
-		name := "stream.m3u8"
-		if rendition == "audio" {
+	case "video", hlsAudioRendition:
+		name := hlsVideoManifestFilename
+		if rendition == hlsAudioRendition {
 			name = "audio.m3u8"
 		}
 		var manifest []byte
@@ -144,7 +144,7 @@ func prepareSeparateAudioTimestampOffset(ctx context.Context, opts TranscodeOpts
 		if stream.Kind == "video" && videoIndex < 0 {
 			videoIndex = stream.Index
 		}
-		if stream.Kind == "audio" {
+		if stream.Kind == hlsAudioRendition {
 			if audioOrdinal == max(0, opts.AudioTrackIndex) {
 				audioIndex = stream.Index
 				audioRate, _ = strconv.ParseFloat(stream.SampleRate, 64)
@@ -230,17 +230,4 @@ func (r separateAudioTimestampReport) initialDTS(streamIndex int) (float64, bool
 		}
 	}
 	return 0, false
-}
-
-func (s *TranscodeSession) cleanSeparateAudioForRestart() {
-	entries, err := os.ReadDir(s.outputDir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == "audio.m3u8" || strings.HasPrefix(name, "audio_") && strings.HasSuffix(name, ".ts") {
-			os.Remove(filepath.Join(s.outputDir, name))
-		}
-	}
 }

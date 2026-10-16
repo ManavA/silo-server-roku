@@ -24,7 +24,7 @@ func ConvertDV7Fragment(ctx context.Context, toolPath string, initData, fragment
 		return nil, nil, err
 	}
 	if len(initData) > 2<<20 || len(fragmentData) > maxDVFragmentBytes {
-		return nil, nil, fmt.Errorf("Dolby Vision fragment exceeds conversion limit")
+		return nil, nil, fmt.Errorf("dolby vision fragment exceeds conversion limit")
 	}
 	initFile, err := mp4.DecodeFile(bytes.NewReader(initData))
 	if err != nil || initFile.Init == nil {
@@ -32,15 +32,15 @@ func ConvertDV7Fragment(ctx context.Context, toolPath string, initData, fragment
 	}
 	init := initFile.Init
 	if init.Moov == nil || len(init.Moov.Traks) != 1 || init.Moov.Mvex == nil || init.Moov.Mvex.Trex == nil {
-		return nil, nil, fmt.Errorf("Dolby Vision conversion requires one fragmented video track")
+		return nil, nil, fmt.Errorf("dolby vision conversion requires one fragmented video track")
 	}
 	track := init.Moov.Trak
 	if track == nil || track.Tkhd == nil || track.Mdia == nil || track.Mdia.Minf == nil || track.Mdia.Minf.Stbl == nil || track.Mdia.Minf.Stbl.Stsd == nil {
-		return nil, nil, fmt.Errorf("Dolby Vision track configuration is unavailable")
+		return nil, nil, fmt.Errorf("dolby vision track configuration is unavailable")
 	}
 	entry := track.Mdia.Minf.Stbl.Stsd.HvcX
 	if entry == nil || entry.HvcC == nil || entry.HvcC.LengthSizeMinusOne != 3 || entry.DoViConfig == nil {
-		return nil, nil, fmt.Errorf("Dolby Vision configuration is unavailable")
+		return nil, nil, fmt.Errorf("dolby vision configuration is unavailable")
 	}
 	config := entry.DoViConfig
 	if config.DVProfile != 7 || !config.RPUPresentFlag || !config.BLPresentFlag || config.DVLevel < 1 || config.DVLevel > 13 {
@@ -52,11 +52,11 @@ func ConvertDV7Fragment(ctx context.Context, toolPath string, initData, fragment
 	}
 	fragment := file.Segments[0].Fragments[0]
 	if fragment.Moof == nil || fragment.Moof.Mfhd == nil || len(fragment.Moof.Trafs) != 1 || fragment.Moof.Trafs[0].Tfhd == nil || fragment.Moof.Trafs[0].Tfhd.TrackID != init.Moov.Trak.Tkhd.TrackID {
-		return nil, nil, fmt.Errorf("Dolby Vision fragment track differs from initialization")
+		return nil, nil, fmt.Errorf("dolby vision fragment track differs from initialization")
 	}
 	samples, err := fragment.GetFullSamples(init.Moov.Mvex.Trex)
 	if err != nil || len(samples) == 0 {
-		return nil, nil, fmt.Errorf("Dolby Vision fragment has no readable samples")
+		return nil, nil, fmt.Errorf("dolby vision fragment has no readable samples")
 	}
 	var annexB bytes.Buffer
 	startCode := []byte{0, 0, 0, 1}
@@ -86,7 +86,7 @@ func ConvertDV7Fragment(ctx context.Context, toolPath string, initData, fragment
 		}
 	}
 	if rpuCount == 0 {
-		return nil, nil, fmt.Errorf("Dolby Vision fragment contains no RPU")
+		return nil, nil, fmt.Errorf("dolby vision fragment contains no RPU")
 	}
 	converted, err := convertDV7AnnexB(ctx, toolPath, annexB.Bytes())
 	if err != nil {
@@ -94,7 +94,7 @@ func ConvertDV7Fragment(ctx context.Context, toolPath string, initData, fragment
 	}
 	rpus := dolbyVisionRPUs(converted)
 	if len(rpus) != rpuCount {
-		return nil, nil, fmt.Errorf("Dolby Vision conversion changed RPU count")
+		return nil, nil, fmt.Errorf("dolby vision conversion changed RPU count")
 	}
 	output, err := mp4.CreateFragment(fragment.Moof.Mfhd.SequenceNumber, init.Moov.Trak.Tkhd.TrackID)
 	if err != nil {
@@ -168,7 +168,7 @@ func convertDV7AnnexB(ctx context.Context, toolPath string, data []byte) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	input, output := filepath.Join(dir, "input.hevc"), filepath.Join(dir, "output.hevc")
 	if err := os.WriteFile(input, data, 0600); err != nil {
 		return nil, err
@@ -178,7 +178,7 @@ func convertDV7AnnexB(ctx context.Context, toolPath string, data []byte) ([]byte
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("Dolby Vision converter failed: %w", err)
+		return nil, fmt.Errorf("dolby vision converter failed: %w", err)
 	}
 	return readBoundedHLSFile(output, maxDVFragmentBytes)
 }
@@ -217,7 +217,7 @@ func readBoundedHLSFile(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	data, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {
 		return nil, err

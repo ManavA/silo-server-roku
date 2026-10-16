@@ -91,7 +91,7 @@ func TestDV7HLSRealToolServesConvertedInitialization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 	if _, err := session.WaitForGenerationManifestContext(ctx, 15*time.Second); err != nil {
 		t.Fatal(err)
 	}

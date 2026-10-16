@@ -32,7 +32,7 @@ func (s *TranscodeSession) prepareDV7Manifest(currentGeneration bool) error {
 		return ErrManifestNotReady
 	}
 	rawDir := filepath.Join(dir, dv7SourceDirectory)
-	manifest, info, err := readManifestFile(filepath.Join(rawDir, "stream.m3u8"))
+	manifest, info, err := readManifestFile(filepath.Join(rawDir, hlsVideoManifestFilename))
 	if err != nil {
 		return ErrManifestNotReady
 	}
@@ -51,7 +51,7 @@ func (s *TranscodeSession) prepareDV7Manifest(currentGeneration bool) error {
 			return err
 		}
 	}
-	return s.publishDV7File(generation, "stream.m3u8", manifest)
+	return s.publishDV7File(generation, hlsVideoManifestFilename, manifest)
 }
 
 func (s *TranscodeSession) ensureDV7Segment(name string) error {
@@ -65,7 +65,7 @@ func (s *TranscodeSession) ensureDV7Segment(name string) error {
 	if restarting || ctx == nil || ctx.Err() != nil {
 		return ErrSegmentNotFound
 	}
-	if name == "init.mp4" {
+	if name == hlsInitFilename {
 		return s.prepareDV7Manifest(false)
 	}
 	number, err := ParseSegmentNumber(name)
@@ -89,7 +89,7 @@ func (s *TranscodeSession) convertDV7SegmentLocked(ctx context.Context, generati
 		return nil
 	}
 	rawDir := filepath.Join(dir, dv7SourceDirectory)
-	init, err := readBoundedHLSFile(filepath.Join(rawDir, "init.mp4"), 2<<20)
+	init, err := readBoundedHLSFile(filepath.Join(rawDir, hlsInitFilename), 2<<20)
 	if err != nil {
 		return ErrSegmentNotFound
 	}
@@ -99,7 +99,7 @@ func (s *TranscodeSession) convertDV7SegmentLocked(ctx context.Context, generati
 		return ErrSegmentNotFound
 	}
 	if info.Size() > maxDVFragmentBytes {
-		return fmt.Errorf("Dolby Vision fragment exceeds conversion limit")
+		return fmt.Errorf("dolby vision fragment exceeds conversion limit")
 	}
 	data, err := readBoundedHLSFile(path, maxDVFragmentBytes)
 	if err != nil {
@@ -111,7 +111,7 @@ func (s *TranscodeSession) convertDV7SegmentLocked(ctx context.Context, generati
 	if err != nil {
 		return err
 	}
-	if err := s.publishDV7File(generation, "init.mp4", convertedInit); err != nil {
+	if err := s.publishDV7File(generation, hlsInitFilename, convertedInit); err != nil {
 		return err
 	}
 	return s.publishDV7File(generation, name, convertedData)
@@ -124,21 +124,21 @@ func (s *TranscodeSession) publishDV7File(generation uint64, name string, data [
 		return ErrSegmentNotFound
 	}
 	path := filepath.Join(s.outputDir, name)
-	if name == "init.mp4" {
+	if name == hlsInitFilename {
 		if existing, err := readBoundedHLSFile(path, maxDVFragmentBytes); err == nil {
 			if bytes.Equal(existing, data) {
 				return nil
 			}
-			return fmt.Errorf("Dolby Vision initialization changed within a transport")
+			return fmt.Errorf("dolby vision initialization changed within a transport")
 		}
 	}
 	file, err := os.CreateTemp(s.outputDir, ".dv-convert-")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(file.Name())
+	defer func() { _ = os.Remove(file.Name()) }()
 	if _, err := file.Write(data); err != nil {
-		file.Close()
+		_ = file.Close()
 		return err
 	}
 	if err := file.Close(); err != nil {
@@ -156,7 +156,7 @@ func prepareDV7HLS(ctx context.Context, opts TranscodeOpts) (string, error) {
 	}
 	path, valid := probeDV7ToDV81ToolchainV3(ctx)
 	if !valid {
-		return "", fmt.Errorf("Dolby Vision conversion tool is unavailable")
+		return "", fmt.Errorf("dolby vision conversion tool is unavailable")
 	}
 	return path, nil
 }
@@ -170,8 +170,8 @@ func (s *TranscodeSession) cleanDV7SourceForRestart(startSegment int) {
 	for _, entry := range entries {
 		name := entry.Name()
 		number, parseErr := ParseSegmentNumber(name)
-		if name == "stream.m3u8" || parseErr == nil && number >= startSegment {
-			os.Remove(filepath.Join(dir, name))
+		if name == hlsVideoManifestFilename || parseErr == nil && number >= startSegment {
+			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}
 }

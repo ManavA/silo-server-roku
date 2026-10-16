@@ -21,7 +21,7 @@ func planServerDV7ToDV81V3(input PlannerInputV3, file *models.MediaFile, source 
 	track.DVBLCompatID = 1
 	track.DVELPresent = false
 	track.DVEnhancementLayer = string(EnhancementNoneV3)
-	track.VideoRangeType = "DOVIWithHDR10"
+	track.VideoRangeType = videoRangeDOVIWithHDR10
 	logical := input
 	logical.EffectiveFile = &converted
 	logical.Request.ClientPlaybackContext.Deliveries = map[string]DeliveryCapabilityV3{DeliveryClassHLSV3: input.Request.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3]}

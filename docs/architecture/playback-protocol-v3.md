@@ -1659,8 +1659,8 @@ A transformation is a named, versioned media operation with claims attached.
 
 The native HLS packaging recipes require explicit client opt-in on both
 `client_features` and the HLS delivery's `features`: `native_hls_mpegts_v1`
-or `native_hls_separate_audio_v1`. If both are present, separate audio takes
-precedence. MPEG-TS packaging is refused for a recipe that preserves Dolby
+or `native_hls_separate_audio_v1`. If both are present, separate audio is tried first; MPEG-TS remains a
+fallback when its recipe is available, compatible and has not been attempted. MPEG-TS packaging is refused for a recipe that preserves Dolby
 Vision. Separate audio requires an audio track; it does not synthesize one.
 Clients that omit these features keep the existing HLS recipe.
 
@@ -1669,9 +1669,10 @@ master and its `?rendition=video` and `?rendition=audio` children share the same
 authorized manifest route. Segment URLs retain the media grant, including
 `EXT-X-MEDIA` URIs passing through a relay. The master reads video codec facts
 from the emitted initialization segment; unknown audio profile detail omits
-`CODECS` rather than guessing it. Audio retention uses its own playlist's
-`EXTINF` durations. Audio segment numbers never advance video recovery or
-throttling.
+`CODECS` rather than guessing it. Audio segment numbers never advance video recovery or throttling. Audio stays
+cached until the transport closes, so audio-first backward seeks keep their
+original segment boundaries and encoder priming. Video retention remains
+bounded by the existing policy.
 
 `server_dv7_to_dv81_v1` is an additional client feature, not a claim that the
 client can decode Profile 7. The planner requires proven Profile 7 base/RPU
@@ -1687,6 +1688,13 @@ original fMP4 sample. Decode times, composition offsets, durations and base
 samples are preserved. Original Profile 7 fragments stay in a private producer
 directory; only converted initialization and media files are served. Restart
 cancels and fences conversion from the old generation before publication.
+Separate-audio recovery replays the frozen original seek/numbering and timestamp
+origin rather than moving to a video segment's keyframe anchor. Cold
+reconstruction uses that same signed recipe. Missing audio waits for its own
+filename; while it waits, the producer may advance without borrowing a video
+ordinal. Replaying from the original origin can make a long forward recovery
+slower, and retaining audio uses more cache space than pruning it. These costs
+preserve URI meaning and A/V timing across recovery.
 This discards the enhancement layer and is not lossless Profile 7 playback.
 
 Copy-HLS reconstruction recipe `3` requires separate audio; recipe `4` also

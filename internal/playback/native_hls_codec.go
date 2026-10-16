@@ -3,6 +3,7 @@ package playback
 import (
 	"bytes"
 	"fmt"
+
 	"github.com/Eyevinn/mp4ff/hevc"
 	"github.com/Eyevinn/mp4ff/mp4"
 )

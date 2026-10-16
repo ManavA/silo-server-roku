@@ -69,7 +69,7 @@ func TestSeparateAudioHLSRealFFmpegKeepsTimestampsAligned(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer session.Close()
+			defer func() { _ = session.Close() }()
 			select {
 			case <-session.done:
 			case <-ctx.Done():

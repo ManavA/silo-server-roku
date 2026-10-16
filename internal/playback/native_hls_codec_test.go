@@ -2,9 +2,10 @@ package playback
 
 import (
 	"bytes"
+	"testing"
+
 	"github.com/Eyevinn/mp4ff/hevc"
 	"github.com/Eyevinn/mp4ff/mp4"
-	"testing"
 )
 
 func TestNativeHLSCodecUsesInitializationConstraints(t *testing.T) {

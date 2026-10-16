@@ -5,6 +5,16 @@ import (
 	"strings"
 )
 
+const (
+	hlsInitFilename          = "init.mp4"
+	hlsVideoManifestFilename = "stream.m3u8"
+	hlsAudioRendition        = "audio"
+	hlsVideoRangeSDR         = "SDR"
+	hlsVideoRangePQ          = "PQ"
+	hlsVideoRangeHLG         = "HLG"
+	videoRangeDOVIWithHDR10  = "DOVIWithHDR10"
+)
+
 // PlanUsesMPEGTSV3 reports the frozen HLS packaging recipe. The transformation
 // keeps route identity and executor capability checks tied to the actual bytes.
 func PlanUsesMPEGTSV3(plan *PlanV3) bool {
@@ -20,12 +30,20 @@ func PlanUsesMPEGTSV3(plan *PlanV3) bool {
 }
 
 func nativeHLSPackagingV3(request StartRequestV3) string {
+	return nativeHLSPackagingCandidatesV3(request)[0]
+}
+
+func nativeHLSPackagingCandidatesV3(request StartRequestV3) []string {
+	var candidates []string
 	for _, recipe := range []struct{ feature, name string }{{ClientNativeHLSSeparateAudioV3, TransformationHLSSeparateAudioV3}, {ClientNativeHLSMPEGTSV3, TransformationHLSMPEGTSV3}} {
 		if HasFeatureV3(request.ClientFeatures, recipe.feature) && deliverySupportsFeatureV3(request, DeliveryClassHLSV3, recipe.feature) {
-			return recipe.name
+			candidates = append(candidates, recipe.name)
 		}
 	}
-	return ""
+	if len(candidates) == 0 {
+		return []string{""}
+	}
+	return candidates
 }
 
 // PlanUsesSeparateAudioHLSV3 reports the frozen audio rendition recipe.
@@ -47,15 +65,15 @@ func NativeHLSMasterAttributesV3(plan *PlanV3, audioProfile string) (string, str
 	if plan == nil {
 		return "", ""
 	}
-	videoRange := "SDR"
+	videoRange := hlsVideoRangeSDR
 	switch plan.EffectiveRecipe.DynamicRange {
 	case DynamicRangeHDR10V3, DynamicRangeHDR10PlusV3, DynamicRangeDolbyVisionV3:
-		videoRange = "PQ"
+		videoRange = hlsVideoRangePQ
 	case DynamicRangeHLGV3:
-		videoRange = "HLG"
+		videoRange = hlsVideoRangeHLG
 	}
 	videoCodec := ""
-	if plan.EffectiveRecipe.VideoCodec == "hevc" {
+	if plan.EffectiveRecipe.VideoCodec == transcodeCodecHEVC {
 		if plan.EffectiveRecipe.DynamicRange == DynamicRangeDolbyVisionV3 && plan.Source.DVLevel > 0 {
 			profile := plan.Source.DVProfile
 			if PlanConvertsDV7ToDV81V3(plan) {
@@ -72,11 +90,11 @@ func NativeHLSMasterAttributesV3(plan *PlanV3, audioProfile string) (string, str
 	}
 	audioCodec := ""
 	switch plan.EffectiveRecipe.AudioCodec {
-	case "eac3":
+	case audioCodecEAC3:
 		audioCodec = "ec-3"
-	case "ac3":
+	case audioCodecAC3:
 		audioCodec = "ac-3"
-	case "aac":
+	case audioCodecAACV3:
 		converted := false
 		for _, transformation := range plan.Transformations {
 			if transformation.Name == TransformationAudioToAACV3 {

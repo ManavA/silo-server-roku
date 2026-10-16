@@ -105,7 +105,7 @@ func TestDV7HLSRejectsAnUnvalidatedToolBeforeOpeningMedia(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	opts := TranscodeOpts{OutputDir: t.TempDir(), FFmpegPath: "/unavailable/ffmpeg", TargetCodecVideo: "copy", SourceVideoCodec: "hevc", SeparateAudioHLS: true, DV7ToDV81: true, VideoSampleEntry: VideoSampleEntryDVH1}
 	_, err := StartTranscode(t.Context(), opts)
-	if err == nil || !strings.Contains(err.Error(), "Dolby Vision conversion tool") {
+	if err == nil || !strings.Contains(err.Error(), "conversion tool") {
 		t.Fatalf("invalid converter reached media execution: %v", err)
 	}
 }

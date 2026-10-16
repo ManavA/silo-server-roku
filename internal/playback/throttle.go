@@ -175,7 +175,7 @@ func (t *TranscodeThrottler) CheckOnce() {
 	// new process before it writes its first segment, so the manifest never
 	// refreshes and the gap never shrinks: the stream deadlocks until the user
 	// seeks. Resume instead if a previous check already paused on stale output.
-	if progressPredatesGeneration(progress) {
+	if progressPredatesGeneration(progress) || t.session.waitingForAudioSegment() {
 		if t.paused {
 			log.Printf("playback: throttler resuming ffmpeg (produced output predates current generation)")
 			t.sendResume()

@@ -12,7 +12,17 @@ import (
 	"time"
 )
 
-func TestSeparateAudioHLSAACPreservesSoundTimingWithoutVideoReordering(t *testing.T) {
+func TestSeparateAudioHLSAACPreservesSoundTiming(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		bframes int
+		seek    float64
+	}{{"no reorder", 0, 0}, {"reordered video", 2, 0}, {"seek", 2, 4}} {
+		t.Run(tc.name, func(t *testing.T) { testSeparateAudioHLSAACTiming(t, tc.bframes, tc.seek) })
+	}
+}
+
+func testSeparateAudioHLSAACTiming(t *testing.T, bframes int, seek float64) {
 	if testing.Short() {
 		t.Skip("real FFmpeg audio integration test")
 	}
@@ -35,13 +45,13 @@ func TestSeparateAudioHLSAACPreservesSoundTimingWithoutVideoReordering(t *testin
 		return data
 	}
 	source := filepath.Join(t.TempDir(), "source.mkv")
-	run(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24", "-f", "lavfi", "-i", "anoisesrc=sample_rate=48000:seed=1234", "-t", "3", "-c:v", "libx264", "-bf", "0", "-g", "48", "-c:a", "eac3", "-ac", "6", source)
+	run(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24", "-f", "lavfi", "-i", "anoisesrc=sample_rate=48000:seed=1234", "-t", "8", "-c:v", "libx264", "-bf", strconv.Itoa(bframes), "-g", "48", "-c:a", "eac3", "-ac", "6", source)
 	dir := t.TempDir()
-	session, err := StartTranscode(ctx, TranscodeOpts{InputPath: source, OutputDir: dir, FFmpegPath: ffmpeg, TargetCodecVideo: "copy", SourceVideoCodec: "h264", TargetCodecAudio: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2, SeparateAudioHLS: true, SegmentDuration: 2})
+	session, err := StartTranscode(ctx, TranscodeOpts{InputPath: source, OutputDir: dir, FFmpegPath: ffmpeg, TargetCodecVideo: "copy", SourceVideoCodec: "h264", TargetCodecAudio: "aac", SourceAudioChannels: 6, TargetAudioChannels: 2, SeparateAudioHLS: true, SegmentDuration: 2, SeekSeconds: seek})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 	select {
 	case <-session.Done():
 	case <-ctx.Done():
@@ -97,7 +107,7 @@ func TestSeparateAudioHLSAACPreservesSoundTimingWithoutVideoReordering(t *testin
 		return pts
 	}
 	pcm := func(path string) []float64 {
-		data := run(ffmpeg, "-v", "error", "-i", path, "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-t", "2", "-c:a", "pcm_f32le", "-f", "f32le", "-")
+		data := run(ffmpeg, "-v", "error", "-i", path, "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-t", "8", "-c:a", "pcm_f32le", "-f", "f32le", "-")
 		result := make([]float64, len(data)/4)
 		for i := range result {
 			result[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(data[i*4 : i*4+4])))
@@ -108,7 +118,8 @@ func TestSeparateAudioHLSAACPreservesSoundTimingWithoutVideoReordering(t *testin
 	outputPath := filepath.Join(dir, "audio.m3u8")
 	outputPTS := firstAudioPTS(outputPath)
 	before, after := pcm(source), pcm(outputPath)
-	const sourceIndex, window = 8192, 1024
+	sourceIndex := 8192 + int(seek*48000)
+	const window = 1024
 	nominal := sourceIndex + int(math.Round((sourcePTS+videoShift-outputPTS)*48000))
 	bestIndex, bestScore := -1, -1.0
 	for index := nominal - 2048; index <= nominal+2048; index++ {

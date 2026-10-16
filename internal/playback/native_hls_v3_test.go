@@ -1,6 +1,9 @@
 package playback
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestPlanPlaybackV3NativeMPEGTS(t *testing.T) {
 	file := detailedFixtureFileV3()
@@ -182,5 +185,30 @@ func TestSeparateAudioHLSRequiresAudioTrack(t *testing.T) {
 	result := PlanPlaybackV3(input)
 	if PlanUsesSeparateAudioHLSV3(result.Plan) {
 		t.Fatal("separate rendition offered without an audio track")
+	}
+}
+
+func TestNativeHLSTriesOtherNegotiatedPackaging(t *testing.T) {
+	for _, unavailable := range []bool{true, false} {
+		t.Run(fmt.Sprint(unavailable), func(t *testing.T) {
+			file := detailedFixtureFileV3()
+			req := nativeMPEGTSRequestV3()
+			req.ClientFeatures = append(req.ClientFeatures, ClientNativeHLSSeparateAudioV3)
+			hls := req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3]
+			hls.Features = append(hls.Features, ClientNativeHLSSeparateAudioV3)
+			req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = hls
+			input := PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Registry: NewTransformationRegistryV3([]TransformationSpecV3{{Name: TransformationHLSMPEGTSV3, RecipeVersion: "1", Available: true}, {Name: TransformationHLSSeparateAudioV3, RecipeVersion: "1", Available: !unavailable}})}
+			if !unavailable {
+				first := PlanPlaybackV3(input)
+				if !PlanUsesSeparateAudioHLSV3(first.Plan) {
+					t.Fatal("preferred recipe missing")
+				}
+				input.AttemptedKeys = []string{first.Plan.PlanAttemptKey}
+			}
+			next := PlanPlaybackV3(input)
+			if !PlanUsesMPEGTSV3(next.Plan) {
+				t.Fatalf("TS fallback missing: %s", ExplainPlannerResultV3(next))
+			}
+		})
 	}
 }

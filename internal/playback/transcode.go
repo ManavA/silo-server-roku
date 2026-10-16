@@ -255,13 +255,11 @@ type TranscodeSession struct {
 	stderrWriter         *ffmpegStderrWriter
 	restartHook          func(context.Context)
 
-	lastCompletedAudioSegment int
-	audioPruneHighWater       int
-	audioPruneRunning         bool
-	dvMu                      sync.Mutex
-	dvContext                 context.Context
-	dvToolPath                string
-	dvInheritedManifest       os.FileInfo
+	audioSegmentWaiters int
+	dvMu                sync.Mutex
+	dvContext           context.Context
+	dvToolPath          string
+	dvInheritedManifest os.FileInfo
 
 	// generationStartedAt is when the currently-owning ffmpeg process was
 	// spawned. Output in the shared directory older than this timestamp was
@@ -472,20 +470,19 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s := &TranscodeSession{
 		dvContext: ctx, dvToolPath: dvToolPath, dvInheritedManifest: statManifest(filepath.Join(opts.OutputDir, dv7SourceDirectory)),
-		cancel:                    cancel,
-		opts:                      opts,
-		outputDir:                 opts.OutputDir,
-		running:                   true,
-		done:                      make(chan struct{}),
-		stderr:                    newBoundedTailBuffer(stderrTailMaxBytes),
-		lastRequestedSegment:      opts.StartSegmentNumber,
-		lastCompletedSegment:      opts.StartSegmentNumber - 1,
-		lastCompletedAudioSegment: opts.StartSegmentNumber - 1, audioPruneHighWater: opts.StartSegmentNumber - 1,
-		lastPruneFloor:     opts.StartSegmentNumber - 1,
-		lastPruneHighWater: opts.StartSegmentNumber - 1,
-		segmentIncarnation: uuid.NewString(),
-		hwWorkloadDevice:   hwWorkloadDevice,
-		copyPlan:           copyPlan,
+		cancel:               cancel,
+		opts:                 opts,
+		outputDir:            opts.OutputDir,
+		running:              true,
+		done:                 make(chan struct{}),
+		stderr:               newBoundedTailBuffer(stderrTailMaxBytes),
+		lastRequestedSegment: opts.StartSegmentNumber,
+		lastCompletedSegment: opts.StartSegmentNumber - 1,
+		lastPruneFloor:       opts.StartSegmentNumber - 1,
+		lastPruneHighWater:   opts.StartSegmentNumber - 1,
+		segmentIncarnation:   uuid.NewString(),
+		hwWorkloadDevice:     hwWorkloadDevice,
+		copyPlan:             copyPlan,
 	}
 
 	args := buildFFmpegArgs(opts)
@@ -3092,7 +3089,6 @@ func (s *TranscodeSession) shutdown(removeOutput bool) error {
 	s.running = false
 	s.segmentGeneration++
 	s.segmentPruneRunning = false
-	s.audioPruneRunning = false
 
 	// Clean up temporary directory.
 	if removeOutput && s.outputDir != "" {
@@ -3336,6 +3332,9 @@ func (s *TranscodeSession) restart(
 	}
 	probeOpts := opts
 	probeOpts.SeekSeconds = seekSeconds
+	if opts.SeparateAudioHLS {
+		probeOpts.SeekSeconds = opts.SeekSeconds
+	}
 	if s.copyPlan != nil {
 		probeOpts.SeekSeconds = 0
 	}
@@ -3365,6 +3364,12 @@ func (s *TranscodeSession) restart(
 	// them from the beginning, so it always restarts there. The requested
 	// segment stays the throttler's target, so FFmpeg runs on to reach it.
 	requestedSegment := startSegment
+	if opts.SeparateAudioHLS {
+		// Replay the frozen origin: audio and video have independent segment
+		// boundaries, so a video anchor must never change an existing audio URI.
+		seekSeconds, startSegment = opts.SeekSeconds, opts.StartSegmentNumber
+		streamOriginSeconds, copySeekAnchorResolved = opts.StreamOriginSeconds, opts.CopySeekAnchorResolved
+	}
 	if s.copyPlan != nil {
 		seekSeconds, startSegment, streamOriginSeconds, copySeekAnchorResolved = 0, 0, 0, true
 	}
@@ -3381,9 +3386,6 @@ func (s *TranscodeSession) restart(
 	preStartRangePrunable := opts.SegmentRetentionSeconds > 0 && s.lastPruneFloor < startSegment
 	s.lastRequestedSegment = startSegment
 	s.lastCompletedSegment = startSegment - 1
-	s.lastCompletedAudioSegment = startSegment - 1
-	s.audioPruneHighWater = startSegment - 1
-	s.audioPruneRunning = false
 	if preStartRangePrunable {
 		// Every restart preserves files below startSegment. Keep an older prune
 		// cursor reachable until replacement downloads age out that range, even
@@ -3419,9 +3421,6 @@ func (s *TranscodeSession) restart(
 			startSegment, previousOpts.TargetCodecVideo, opts.TargetCodecVideo)
 	}
 
-	if opts.SeparateAudioHLS {
-		s.cleanSeparateAudioForRestart()
-	}
 	if opts.DV7ToDV81 {
 		s.cleanDV7SourceForRestart(startSegment)
 	}
@@ -3494,9 +3493,6 @@ func (s *TranscodeSession) restart(
 	s.stdinPipe = stdinPipe
 	s.lastRequestedSegment = requestedSegment
 	s.lastCompletedSegment = startSegment - 1
-	s.lastCompletedAudioSegment = startSegment - 1
-	s.audioPruneHighWater = startSegment - 1
-	s.audioPruneRunning = false
 	s.generationStartedAt = startedAt
 	s.inheritedManifest = inheritedManifest
 	s.done = make(chan struct{})
