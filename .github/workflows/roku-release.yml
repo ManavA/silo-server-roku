@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Existing Roku prerelease tag (v0.1.0-roku.1)
+        description: Existing Roku prerelease tag (v0.1.0-roku.2)
         required: true
         type: string
 

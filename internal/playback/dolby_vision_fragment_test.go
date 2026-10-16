@@ -118,3 +118,28 @@ func TestDV7FragmentConversionHonorsCancellationBeforeReadingMedia(t *testing.T)
 		t.Fatalf("canceled conversion = %v", err)
 	}
 }
+
+func TestLengthPrefixedHEVCNALsRejectsMalformedLengths(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "truncated prefix", data: []byte{0, 0, 0}},
+		{name: "missing header", data: []byte{0, 0, 0, 1, 0x26}},
+		{name: "truncated payload", data: []byte{0, 0, 0, 3, 0x26, 1}},
+		{name: "maximum unsigned length", data: []byte{255, 255, 255, 255, 0x26, 1}},
+		{name: "signed integer overflow", data: []byte{128, 0, 0, 0, 0x26, 1}},
+		{name: "trailing partial prefix", data: []byte{0, 0, 0, 2, 0x26, 1, 0}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := lengthPrefixedHEVCNALs(test.data); err == nil {
+				t.Fatal("malformed HEVC NAL length was accepted")
+			}
+		})
+	}
+	valid := []byte{0, 0, 0, 2, 0x26, 1, 0, 0, 0, 3, 0x7c, 1, 7}
+	nalus, err := lengthPrefixedHEVCNALs(valid)
+	if err != nil || len(nalus) != 2 || !bytes.Equal(nalus[0], []byte{0x26, 1}) || !bytes.Equal(nalus[1], []byte{0x7c, 1, 7}) {
+		t.Fatalf("valid bounded NALs = %x, %v", nalus, err)
+	}
+}

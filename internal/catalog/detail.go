@@ -472,6 +472,8 @@ type ItemUserState struct {
 	Played      bool `json:"played"`
 	IsFavorite  bool `json:"is_favorite"`
 	InWatchlist bool `json:"in_watchlist"`
+	// NotInterested is served by v2 only; the frozen v1 shape leaves it out.
+	NotInterested bool `json:"-"`
 }
 
 // CastCredit is the item-detail API shape for a cast member.
@@ -2941,6 +2943,9 @@ func (s *DetailService) fetchBookAlsoByAuthor(ctx context.Context, contentID str
 		item.PosterURL = s.presignAudiobookPosterURL(ctx, posterPath, filter)
 		out = append(out, item)
 	}
+	if rows.Err() != nil {
+		return []AudiobookRelatedItem{}
+	}
 	return out
 }
 
@@ -3007,6 +3012,9 @@ func (s *DetailService) fetchBookSimilarByGenres(ctx context.Context, contentID 
 		}
 		item.PosterURL = s.presignAudiobookPosterURL(ctx, posterPath, filter)
 		out = append(out, item)
+	}
+	if rows.Err() != nil {
+		return []AudiobookRelatedItem{}
 	}
 	return out
 }
@@ -3082,6 +3090,9 @@ func (s *DetailService) fetchBookSeries(ctx context.Context, contentID string, m
 		item.PosterURL = s.presignAudiobookPosterURL(ctx, poster, filter)
 		entries = append(entries, item)
 	}
+	if rows.Err() != nil {
+		return nil
+	}
 	if len(entries) < 2 {
 		return nil
 	}
@@ -3145,6 +3156,9 @@ func (s *DetailService) fetchAudiobookOtherNarrations(ctx context.Context, conte
 		}
 		item.Narrators = splitDelimitedNames(narrators)
 		out = append(out, item)
+	}
+	if rows.Err() != nil {
+		return []AudiobookNarration{}
 	}
 	return out
 }

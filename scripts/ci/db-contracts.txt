@@ -112,6 +112,10 @@
 ./internal/metadata TestLocalArtworkCopiedOnDiscoveryDB
 ./internal/metadata TestLocalArtworkRetriesWithoutLibraryRootDB
 
+# With metadata.cache_images off, stored artwork goes back to its provider
+# source, and items whose stored art has none are queued for a refresh.
+./internal/metadata TestStoredArtworkReleaseDB
+
 # Artwork publication, deletion locks and corrected metadata identity.
 ./internal/metadata TestArtworkDeliveryPublicationAndReconciliation
 ./internal/metadata TestArtworkRevisionGCSerializesDeletionWithRetracking
@@ -151,6 +155,12 @@
 ./internal/notifications TestNotifyFulfilledRetriesWhenRecipientScopeFails
 ./internal/notifications TestNotifyFulfilledRetryResolvesOnlyUntoldRecipients
 ./internal/notifications TestDispatchOperationalResolvesBeforeHoldingConnection
+./internal/notifications TestListNotifiedSeriesMergesLibrariesAndAppliesPreferences
+./internal/notifications TestFanoutSkipsProfilesThatMutedTheSeries
+./internal/notifications TestSeriesMutesList
+./internal/notifications TestSeriesMutesUnmuteAndPurge
+./internal/metadata TestCanonicalizeMediaItemReferencesMergesNotificationMutesPostgres
+./internal/catalog/reattribute TestMovePairsMovesNotificationMutesDB
 ./internal/requests TestEditorIntegrationsDatabase
 ./internal/requests TestIntegrationKeyStaysWithItsAddressDatabase
 ./internal/requests TestClosingRequestForgetsFollowsDatabase
@@ -371,3 +381,10 @@
 # A played mark later in the same second as a history removal stays visible.
 ./internal/userstore/pgstore TestImportedWritesAfterSameSecondRemovalDB
 ./internal/webhooksync TestProcessWebhookPlayedInSameSecondAsUnplayedDB
+
+# A history import run stays within its source limits from the queue to
+# Postgres: large Jellyfin, Emby and Plex sources import completely with paged
+# listings and chunked lookups, and a listing that decodes into millions of
+# values fails the run without allocating it.
+./internal/historyimport TestImportRunReadsLargeSourcesWithinLimits
+./internal/historyimport TestImportRunFailsOnExpandingSourceListing

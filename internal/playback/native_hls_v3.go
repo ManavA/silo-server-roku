@@ -74,22 +74,7 @@ func NativeHLSMasterAttributesV3(plan *PlanV3, audioProfile string) (string, str
 	case DynamicRangeHLGV3:
 		videoRange = hlsVideoRangeHLG
 	}
-	videoCodec := ""
-	if plan.EffectiveRecipe.VideoCodec == transcodeCodecHEVC {
-		if plan.EffectiveRecipe.DynamicRange == DynamicRangeDolbyVisionV3 && plan.Source.DVLevel > 0 {
-			profile := plan.Source.DVProfile
-			if PlanConvertsDV7ToDV81V3(plan) {
-				profile = 8
-			}
-			videoCodec = fmt.Sprintf("dvh1.%02d.%02d", profile, plan.Source.DVLevel)
-		} else if plan.Source.VideoLevel > 0 {
-			profile := "1.6"
-			if plan.Source.BitDepth > 8 {
-				profile = "2.4"
-			}
-			videoCodec = fmt.Sprintf("hvc1.%s.L%d.B0", profile, plan.Source.VideoLevel)
-		}
-	}
+	videoCodec := nativeHLSVideoCodecV3(plan)
 	audioCodec := ""
 	switch plan.EffectiveRecipe.AudioCodec {
 	case audioCodecEAC3:
@@ -111,4 +96,25 @@ func NativeHLSMasterAttributesV3(plan *PlanV3, audioProfile string) (string, str
 		return "", videoRange
 	}
 	return videoCodec + "," + audioCodec, videoRange
+}
+
+func nativeHLSVideoCodecV3(plan *PlanV3) string {
+	if plan.EffectiveRecipe.VideoCodec != transcodeCodecHEVC {
+		return ""
+	}
+	if plan.EffectiveRecipe.DynamicRange == DynamicRangeDolbyVisionV3 && plan.Source.DVLevel > 0 {
+		profile := plan.Source.DVProfile
+		if PlanConvertsDV7ToDV81V3(plan) {
+			profile = 8
+		}
+		return fmt.Sprintf("dvh1.%02d.%02d", profile, plan.Source.DVLevel)
+	}
+	if plan.Source.VideoLevel <= 0 {
+		return ""
+	}
+	profile := "1.6"
+	if plan.Source.BitDepth > 8 {
+		profile = "2.4"
+	}
+	return fmt.Sprintf("hvc1.%s.L%d.B0", profile, plan.Source.VideoLevel)
 }

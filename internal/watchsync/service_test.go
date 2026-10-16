@@ -15,6 +15,7 @@ import (
 	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+
 	"github.com/Silo-Server/silo-server/internal/historyimport"
 	"github.com/Silo-Server/silo-server/internal/userdb"
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -843,7 +844,7 @@ func (r *serviceFakeRepo) CompleteConfirmedScrobbleStop(_ context.Context, playb
 	r.scrobbleMu.Lock()
 	defer r.scrobbleMu.Unlock()
 	key := playbackSessionID + "|" + connectionID
-	if r.confirmingScrobbles[key] != claimVersion {
+	if !r.confirmingScrobbles[key].Equal(claimVersion) {
 		return errConfirmedStopClaimLost
 	}
 	delete(r.confirmingScrobbles, key)
@@ -868,7 +869,7 @@ func (r *serviceFakeRepo) FailConfirmedScrobbleStop(_ context.Context, playbackS
 	r.scrobbleMu.Lock()
 	defer r.scrobbleMu.Unlock()
 	key := playbackSessionID + "|" + connectionID
-	if r.confirmingScrobbles[key] != claimVersion {
+	if !r.confirmingScrobbles[key].Equal(claimVersion) {
 		return errConfirmedStopClaimLost
 	}
 	delete(r.confirmingScrobbles, key)
@@ -1940,6 +1941,32 @@ func TestServiceSyncConnectionRefreshesExpiredToken(t *testing.T) {
 	}
 }
 
+// refreshedAccessToken returns a saved connection's access token through the
+// serialized refresh path, so tests can drive refreshConnectionIfNeeded the
+// way a sync does.
+func refreshedAccessToken(ctx context.Context, s *Service, connectionID string) (string, error) {
+	conn, ok, err := s.repo.GetConnectionByID(ctx, connectionID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", ErrConnectionNotFound
+	}
+	provider, ok := s.registry.Get(conn.Provider)
+	if !ok {
+		return "", UnknownProviderError{Key: conn.Provider}
+	}
+	cfg, err := s.serverConfig(ctx, conn.Provider)
+	if err != nil {
+		return "", err
+	}
+	conn, err = s.refreshConnectionIfNeeded(ctx, provider, cfg, conn)
+	if err != nil {
+		return "", err
+	}
+	return conn.AccessToken, nil
+}
+
 func TestServiceTokenRefreshPreservesConcurrentConnectionChanges(t *testing.T) {
 	for _, change := range []string{"disconnect", "reconnect", "account switch", "sync state"} {
 		t.Run(change, func(t *testing.T) {
@@ -1981,7 +2008,7 @@ func TestServiceTokenRefreshPreservesConcurrentConnectionChanges(t *testing.T) {
 				repo.connections[key] = current
 				return nil
 			}
-			_, err := service.AccessToken(t.Context(), conn.ID)
+			_, err := refreshedAccessToken(t.Context(), service, conn.ID)
 			current, exists := repo.connections[key]
 			switch change {
 			case "disconnect":
@@ -2034,7 +2061,7 @@ func TestServiceTokenRefreshReloadsAccountBinding(t *testing.T) {
 	}
 	service := NewService(repo, registry)
 	service.now = func() time.Time { return now }
-	if _, err := service.AccessToken(t.Context(), conn.ID); err != nil {
+	if _, err := refreshedAccessToken(t.Context(), service, conn.ID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -2071,7 +2098,7 @@ func TestServiceDisconnectWaitsForAnInFlightTokenRefresh(t *testing.T) {
 
 	refreshDone := make(chan error, 1)
 	go func() {
-		_, err := service.AccessToken(ctx, "conn-1")
+		_, err := refreshedAccessToken(ctx, service, "conn-1")
 		refreshDone <- err
 	}()
 	<-entered

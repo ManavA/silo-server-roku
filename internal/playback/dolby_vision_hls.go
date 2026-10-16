@@ -3,6 +3,7 @@ package playback
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -99,7 +100,7 @@ func (s *TranscodeSession) convertDV7SegmentLocked(ctx context.Context, generati
 		return ErrSegmentNotFound
 	}
 	if info.Size() > maxDVFragmentBytes {
-		return fmt.Errorf("dolby vision fragment exceeds conversion limit")
+		return errors.New("dolby vision fragment exceeds conversion limit")
 	}
 	data, err := readBoundedHLSFile(path, maxDVFragmentBytes)
 	if err != nil {
@@ -129,7 +130,7 @@ func (s *TranscodeSession) publishDV7File(generation uint64, name string, data [
 			if bytes.Equal(existing, data) {
 				return nil
 			}
-			return fmt.Errorf("dolby vision initialization changed within a transport")
+			return errors.New("dolby vision initialization changed within a transport")
 		}
 	}
 	file, err := os.CreateTemp(s.outputDir, ".dv-convert-")
@@ -152,11 +153,11 @@ func prepareDV7HLS(ctx context.Context, opts TranscodeOpts) (string, error) {
 		return "", nil
 	}
 	if !opts.SeparateAudioHLS || opts.CopyVideoMPEGTS || !strings.EqualFold(opts.TargetCodecVideo, "copy") || !strings.EqualFold(opts.SourceVideoCodec, "hevc") || opts.VideoSampleEntry != VideoSampleEntryDVH1 {
-		return "", fmt.Errorf("unsupported Dolby Vision conversion recipe")
+		return "", errors.New("unsupported Dolby Vision conversion recipe")
 	}
 	path, valid := probeDV7ToDV81ToolchainV3(ctx)
 	if !valid {
-		return "", fmt.Errorf("dolby vision conversion tool is unavailable")
+		return "", errors.New("dolby vision conversion tool is unavailable")
 	}
 	return path, nil
 }

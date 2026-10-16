@@ -57,29 +57,9 @@ func testSeparateAudioHLSAACTiming(t *testing.T, bframes int, seek float64) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	videoPackets := func(path string) map[string]float64 {
-		var report struct {
-			Packets []struct {
-				PTS  string `json:"pts_time"`
-				Hash string `json:"data_hash"`
-			} `json:"packets"`
-		}
-		if err := json.Unmarshal(run(ffprobe, "-v", "error", "-select_streams", "v:0", "-show_packets", "-show_data_hash", "sha256", "-show_entries", "packet=pts_time,data_hash", "-of", "json", path), &report); err != nil {
-			t.Fatal(err)
-		}
-		result := map[string]float64{}
-		for _, packet := range report.Packets {
-			pts, err := strconv.ParseFloat(packet.PTS, 64)
-			if err != nil {
-				t.Fatal(err)
-			}
-			result[packet.Hash] = pts
-		}
-		return result
-	}
-	original := videoPackets(source)
+	original := separateAudioAACVideoPackets(t, run, ffprobe, source)
 	videoShift := math.NaN()
-	for hash, pts := range videoPackets(filepath.Join(dir, "stream.m3u8")) {
+	for hash, pts := range separateAudioAACVideoPackets(t, run, ffprobe, filepath.Join(dir, "stream.m3u8")) {
 		if before, exists := original[hash]; exists {
 			videoShift = pts - before
 			break
@@ -87,24 +67,6 @@ func testSeparateAudioHLSAACTiming(t *testing.T, bframes int, seek float64) {
 	}
 	if math.IsNaN(videoShift) {
 		t.Fatal("copied video packet identity is unavailable")
-	}
-	firstAudioPTS := func(path string) float64 {
-		var report struct {
-			Frames []struct {
-				PTS string `json:"pts_time"`
-			} `json:"frames"`
-		}
-		if err := json.Unmarshal(run(ffprobe, "-v", "error", "-select_streams", "a:0", "-show_frames", "-show_entries", "frame=pts_time", "-of", "json", path), &report); err != nil {
-			t.Fatal(err)
-		}
-		if len(report.Frames) == 0 {
-			t.Fatal("audio rendition has no decoded frames")
-		}
-		pts, err := strconv.ParseFloat(report.Frames[0].PTS, 64)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pts
 	}
 	pcm := func(path string) []float64 {
 		data := run(ffmpeg, "-v", "error", "-i", path, "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-t", "8", "-c:a", "pcm_f32le", "-f", "f32le", "-")
@@ -114,9 +76,9 @@ func testSeparateAudioHLSAACTiming(t *testing.T, bframes int, seek float64) {
 		}
 		return result
 	}
-	sourcePTS := firstAudioPTS(source)
+	sourcePTS := separateAudioAACFirstPTS(t, run, ffprobe, source)
 	outputPath := filepath.Join(dir, "audio.m3u8")
-	outputPTS := firstAudioPTS(outputPath)
+	outputPTS := separateAudioAACFirstPTS(t, run, ffprobe, outputPath)
 	before, after := pcm(source), pcm(outputPath)
 	sourceIndex := 8192 + int(seek*48000)
 	const window = 1024
@@ -148,4 +110,46 @@ func testSeparateAudioHLSAACTiming(t *testing.T, bframes int, seek float64) {
 	if math.Abs(audioShift-videoShift) > 0.005 {
 		t.Fatalf("sound/video timestamp shifts differ: %.6f/%.6f (sourcePTS %.6f, outputPTS %.6f, sample shift %d)", audioShift, videoShift, sourcePTS, outputPTS, bestIndex-sourceIndex)
 	}
+}
+
+func separateAudioAACVideoPackets(t *testing.T, run func(string, ...string) []byte, ffprobe, path string) map[string]float64 {
+	t.Helper()
+	var report struct {
+		Packets []struct {
+			PTS  string `json:"pts_time"`
+			Hash string `json:"data_hash"`
+		} `json:"packets"`
+	}
+	if err := json.Unmarshal(run(ffprobe, "-v", "error", "-select_streams", "v:0", "-show_packets", "-show_data_hash", "sha256", "-show_entries", "packet=pts_time,data_hash", "-of", "json", path), &report); err != nil {
+		t.Fatal(err)
+	}
+	result := map[string]float64{}
+	for _, packet := range report.Packets {
+		pts, err := strconv.ParseFloat(packet.PTS, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[packet.Hash] = pts
+	}
+	return result
+}
+
+func separateAudioAACFirstPTS(t *testing.T, run func(string, ...string) []byte, ffprobe, path string) float64 {
+	t.Helper()
+	var report struct {
+		Frames []struct {
+			PTS string `json:"pts_time"`
+		} `json:"frames"`
+	}
+	if err := json.Unmarshal(run(ffprobe, "-v", "error", "-select_streams", "a:0", "-show_frames", "-show_entries", "frame=pts_time", "-of", "json", path), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Frames) == 0 {
+		t.Fatal("audio rendition has no decoded frames")
+	}
+	pts, err := strconv.ParseFloat(report.Frames[0].PTS, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pts
 }

@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -80,7 +81,7 @@ func (s *TranscodeSession) buildSeparateAudioManifest(segPrefix, rawQuery string
 		manifest = stabilizeCopyHLSRemountTimeline(manifest, opts)
 		return RewriteManifestPaths(manifest, segPrefix, query.Encode())
 	default:
-		return nil, fmt.Errorf("unsupported HLS rendition")
+		return nil, errors.New("unsupported HLS rendition")
 	}
 }
 
@@ -104,7 +105,7 @@ func validateSeparateAudioHLS(opts TranscodeOpts) error {
 			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '.' && r != ',' && r != '-'
 		}) ||
 		opts.HLSVideoRange != "" && opts.HLSVideoRange != hlsVideoRangeSDR && opts.HLSVideoRange != hlsVideoRangePQ && opts.HLSVideoRange != hlsVideoRangeHLG {
-		return fmt.Errorf("unsupported separate-audio HLS recipe")
+		return errors.New("unsupported separate-audio HLS recipe")
 	}
 	return nil
 }
@@ -122,7 +123,7 @@ func prepareSeparateAudioTimestampOffset(ctx context.Context, opts TranscodeOpts
 	if opts.SeekSeconds > 0 {
 		interval = fmt.Sprintf("%.6f%%+#128", opts.SeekSeconds)
 	}
-	command := exec.CommandContext(probeCtx, ffprobePathFromFFmpeg(ResolveFFmpegPath(opts.FFmpegPath)),
+	command := exec.CommandContext(probeCtx, ffprobePathFromFFmpeg(ResolveFFmpegPath(opts.FFmpegPath)), //nolint:gosec // G204: server-configured executable; catalog/executor input path and numeric seek are passed as arguments without a shell.
 		"-v", "error", "-read_intervals", interval,
 		"-show_entries", "packet=stream_index,dts_time,duration_time:packet_side_data=skip_samples:stream=index,codec_type,sample_rate:format=start_time", "-of", "json", opts.InputPath)
 	output, err := command.Output()
@@ -131,11 +132,11 @@ func prepareSeparateAudioTimestampOffset(ctx context.Context, opts TranscodeOpts
 	}
 	var report separateAudioTimestampReport
 	if json.Unmarshal(output, &report) != nil {
-		return opts, fmt.Errorf("separate-audio timestamp evidence is unavailable")
+		return opts, errors.New("separate-audio timestamp evidence is unavailable")
 	}
 	start, err := strconv.ParseFloat(report.Format.Start, 64)
 	if err != nil || math.IsNaN(start) || math.IsInf(start, 0) {
-		return opts, fmt.Errorf("unsupported separate-audio timestamp evidence")
+		return opts, errors.New("unsupported separate-audio timestamp evidence")
 	}
 	videoIndex, audioIndex := -1, -1
 	audioOrdinal := 0
@@ -155,13 +156,13 @@ func prepareSeparateAudioTimestampOffset(ctx context.Context, opts TranscodeOpts
 	videoDTS, videoOK := report.initialDTS(videoIndex)
 	audioDTS, audioOK := report.initialDTS(audioIndex)
 	if !videoOK || !audioOK {
-		return opts, fmt.Errorf("unsupported separate-audio timestamp evidence")
+		return opts, errors.New("unsupported separate-audio timestamp evidence")
 	}
 	// AAC's native encoder emits one frame of priming before decoded sound.
 	// Include it in the common lift so the TS muxer does not shift audio alone.
 	if codec := strings.ToLower(strings.TrimSpace(opts.TargetCodecAudio)); codec == audioCodecAACV3 || codec == "" {
 		if audioRate < 8000 || audioRate > 192000 || math.IsNaN(audioRate) || math.IsInf(audioRate, 0) {
-			return opts, fmt.Errorf("unsupported separate-audio sample rate")
+			return opts, errors.New("unsupported separate-audio sample rate")
 		}
 		for _, packet := range report.Packets {
 			if packet.StreamIndex != audioIndex {
@@ -176,7 +177,7 @@ func prepareSeparateAudioTimestampOffset(ctx context.Context, opts TranscodeOpts
 	}
 	offset := max(0, start-min(videoDTS, audioDTS))
 	if offset > 2 {
-		return opts, fmt.Errorf("unsupported separate-audio timestamp evidence")
+		return opts, errors.New("unsupported separate-audio timestamp evidence")
 	}
 	opts.separateAudioTimestampOffset = offset
 	return opts, nil

@@ -19,11 +19,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/processmetrics"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
-	"github.com/google/uuid"
 )
 
 func init() {
@@ -257,7 +258,7 @@ type TranscodeSession struct {
 
 	audioSegmentWaiters int
 	dvMu                sync.Mutex
-	dvContext           context.Context
+	dvContext           context.Context //nolint:containedctx // current FFmpeg generation context, canceled with its process
 	dvToolPath          string
 	dvInheritedManifest os.FileInfo
 
@@ -444,7 +445,7 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 	if opts.DV7ToDV81 {
-		if err := os.MkdirAll(filepath.Join(opts.OutputDir, dv7SourceDirectory), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Join(opts.OutputDir, dv7SourceDirectory), 0750); err != nil {
 			releaseHWDevice()
 			return nil, err
 		}
@@ -2137,9 +2138,9 @@ func (s *TranscodeSession) getManifest(currentGeneration bool) ([]byte, error) {
 				if s.waitErr != nil {
 					stderr := truncateStderr(s.stderr.String())
 					if stderr != "" {
-						return nil, fmt.Errorf("%w: %v (stderr: %s)", ErrTranscodeFailed, s.waitErr, stderr)
+						return nil, fmt.Errorf("%w: %w (stderr: %s)", ErrTranscodeFailed, s.waitErr, stderr)
 					}
-					return nil, fmt.Errorf("%w: %v", ErrTranscodeFailed, s.waitErr)
+					return nil, fmt.Errorf("%w: %w", ErrTranscodeFailed, s.waitErr)
 				}
 				return nil, ErrTranscodeFailed
 			}
@@ -2252,7 +2253,7 @@ func (s *TranscodeSession) waitForManifest(ctx context.Context, timeout time.Dur
 		if err == nil {
 			return manifest, nil
 		}
-		if err != nil && err != ErrManifestNotReady {
+		if !errors.Is(err, ErrManifestNotReady) {
 			return nil, err
 		}
 
@@ -3484,7 +3485,7 @@ func (s *TranscodeSession) restart(
 	}
 	s.cmd = cmd
 	s.cancel = cancel
-	s.dvContext = ctx
+	s.dvContext = ctx //nolint:fatcontext // replaces the generation context with the new caller context
 	s.dvToolPath = dvToolPath
 	s.dvInheritedManifest = dvInheritedManifest
 	s.opts = opts
@@ -3543,7 +3544,7 @@ func (s *TranscodeSession) WaitForSegment(name string, timeout time.Duration) (s
 		}
 
 		if !running && waitErr != nil {
-			return "", fmt.Errorf("%w: %v", ErrTranscodeFailed, waitErr)
+			return "", fmt.Errorf("%w: %w", ErrTranscodeFailed, waitErr)
 		}
 		// If ffmpeg finished cleanly but the segment doesn't exist,
 		// it won't appear later — fail fast.
@@ -3755,9 +3756,9 @@ func (s *TranscodeSession) manifestTimeoutError(timeout time.Duration) error {
 
 	switch {
 	case waitErr != nil && stderr != "":
-		return fmt.Errorf("%w after %s: ffmpeg exited: %v (stderr: %s)", ErrManifestNotReady, timeout, waitErr, stderr)
+		return fmt.Errorf("%w after %s: ffmpeg exited: %w (stderr: %s)", ErrManifestNotReady, timeout, waitErr, stderr)
 	case waitErr != nil:
-		return fmt.Errorf("%w after %s: ffmpeg exited: %v", ErrManifestNotReady, timeout, waitErr)
+		return fmt.Errorf("%w after %s: ffmpeg exited: %w", ErrManifestNotReady, timeout, waitErr)
 	case running:
 		return fmt.Errorf("%w after %s: ffmpeg still running", ErrManifestNotReady, timeout)
 	default:
@@ -4152,7 +4153,8 @@ func formatWaitError(err error) string {
 	if err == nil {
 		return ""
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
 			return fmt.Sprintf("exit_code=%d: %v", status.ExitStatus(), err)
 		}

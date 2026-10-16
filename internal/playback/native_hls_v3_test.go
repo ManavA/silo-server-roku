@@ -1,7 +1,7 @@
 package playback
 
 import (
-	"fmt"
+	"strconv"
 	"testing"
 )
 
@@ -190,7 +190,7 @@ func TestSeparateAudioHLSRequiresAudioTrack(t *testing.T) {
 
 func TestNativeHLSTriesOtherNegotiatedPackaging(t *testing.T) {
 	for _, unavailable := range []bool{true, false} {
-		t.Run(fmt.Sprint(unavailable), func(t *testing.T) {
+		t.Run(strconv.FormatBool(unavailable), func(t *testing.T) {
 			file := detailedFixtureFileV3()
 			req := nativeMPEGTSRequestV3()
 			req.ClientFeatures = append(req.ClientFeatures, ClientNativeHLSSeparateAudioV3)

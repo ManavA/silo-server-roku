@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,11 +12,11 @@ import (
 // an audio segment with the same number can begin at a different source time.
 func ParseAudioSegmentNumber(name string) (int, error) {
 	if len(name) > 64 || !strings.HasPrefix(name, "audio_") || !strings.HasSuffix(name, ".ts") {
-		return 0, fmt.Errorf("invalid audio segment")
+		return 0, errors.New("invalid audio segment")
 	}
 	number, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(name, "audio_"), ".ts"))
 	if err != nil || number < 0 || name != fmt.Sprintf("audio_%05d.ts", number) {
-		return 0, fmt.Errorf("invalid audio segment")
+		return 0, errors.New("invalid audio segment")
 	}
 	return number, nil
 }

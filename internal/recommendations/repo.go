@@ -10,12 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Silo-Server/silo-server/internal/access"
-	"github.com/Silo-Server/silo-server/internal/catalog"
-	"github.com/Silo-Server/silo-server/internal/embeddingvectors"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
+
+	"github.com/Silo-Server/silo-server/internal/access"
+	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/embeddingvectors"
 )
 
 func ensureCanonicalDimensions(vec []float32) ([]float32, error) {
@@ -358,7 +359,7 @@ func (r *Repo) GetEmbedding(ctx context.Context, itemID string) ([]float32, erro
 		itemID,
 	).Scan(&v)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get embedding for item %s: %w", itemID, err)
@@ -927,7 +928,7 @@ func (r *Repo) GetTasteProfileMeta(ctx context.Context, userID int, profileID st
 		userID, profileID,
 	).Scan(&countsJSON, &maxContentRating, &updatedAt)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get taste profile meta for user %d profile %s: %w", userID, profileID, err)
@@ -954,7 +955,7 @@ func (r *Repo) GetTasteProfile(ctx context.Context, userID int, profileID string
 		userID, profileID,
 	).Scan(&v)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get taste profile for user %d profile %s: %w", userID, profileID, err)
@@ -1139,7 +1140,7 @@ func (r *Repo) GetRecommendationCache(ctx context.Context, userID int, profileID
 	query, args := recommendationCacheLookup(userID, profileID, recType, sourceItemID)
 	err := r.pool.QueryRow(ctx, query, args...).Scan(&itemsJSON)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get recommendation cache: %w", err)
@@ -1524,6 +1525,8 @@ func (r *Repo) MarkProfilesStaleForItems(ctx context.Context, itemIDs []string) 
 		   OR EXISTS (SELECT 1 FROM user_favorites s JOIN ids ON ids.id = s.media_item_id
 		              WHERE s.user_id = tp.user_id AND s.profile_id = tp.profile_id)
 		   OR EXISTS (SELECT 1 FROM user_watchlist s JOIN ids ON ids.id = s.media_item_id
+		              WHERE s.user_id = tp.user_id AND s.profile_id = tp.profile_id)
+		   OR EXISTS (SELECT 1 FROM user_not_interested s JOIN ids ON ids.id = s.media_item_id
 		              WHERE s.user_id = tp.user_id AND s.profile_id = tp.profile_id)
 		ON CONFLICT (user_id, profile_id) DO UPDATE SET stale_at = NOW()`,
 		itemIDs)
@@ -2595,6 +2598,28 @@ func (r *Repo) GetFavoriteItemIDs(ctx context.Context, userID int, profileID str
 		return nil, fmt.Errorf("get favorite item IDs: %w", err)
 	}
 	return ids, nil
+}
+
+// GetNotInterestedMarks returns the profile's Not interested marks, newest
+// first.
+func (r *Repo) GetNotInterestedMarks(ctx context.Context, userID int, profileID string) ([]NotInterestedMark, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT media_item_id, added_at FROM user_not_interested
+		 WHERE user_id = $1 AND profile_id = $2
+		 ORDER BY added_at DESC, media_item_id DESC`,
+		userID, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("get not interested marks: %w", err)
+	}
+	marks, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (NotInterestedMark, error) {
+		var m NotInterestedMark
+		err := row.Scan(&m.MediaItemID, &m.MarkedAt)
+		return m, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get not interested marks: %w", err)
+	}
+	return marks, nil
 }
 
 // GetRecentCompletedItemIDs returns the most recently completed canonical item

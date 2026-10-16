@@ -792,7 +792,7 @@ func (s *Service) syncConnectionWithRun(ctx context.Context, conn Connection, ru
 
 func (s *Service) tryLock(connectionID string) (func(), bool) {
 	value, _ := s.locks.LoadOrStore(connectionID, &sync.Mutex{})
-	mu := value.(*sync.Mutex)
+	mu := value.(*sync.Mutex) //nolint:errcheck,forcetypeassert // locks stores only *sync.Mutex
 	if !mu.TryLock() {
 		return nil, false
 	}
@@ -1474,46 +1474,16 @@ func hasVisibleCompletedHistoryAtOrAfter(ctx context.Context, store completedHis
 
 const tokenRefreshSkew = 5 * time.Minute
 
-// AccessToken returns a usable access token for a saved connection, refreshing
-// it first when it is about to expire. Callers outside watch sync, such as
-// Trakt recommendation collections, use it so their refreshes share the
-// serialized path in refreshConnectionIfNeeded.
-func (s *Service) AccessToken(ctx context.Context, connectionID string) (string, error) {
-	conn, ok, err := s.repo.GetConnectionByID(ctx, connectionID)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "", ErrConnectionNotFound
-	}
-	provider, ok := s.registry.Get(conn.Provider)
-	if !ok {
-		return "", UnknownProviderError{Key: conn.Provider}
-	}
-	cfg, err := s.serverConfig(ctx, conn.Provider)
-	if err != nil {
-		return "", err
-	}
-	conn, err = s.refreshConnectionIfNeeded(ctx, provider, cfg, conn)
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(conn.AccessToken) == "" {
-		return "", fmt.Errorf("%s connection is missing an access token; reconnect the provider", conn.Provider)
-	}
-	return conn.AccessToken, nil
-}
-
 func (s *Service) tokenNeedsRefresh(conn Connection) bool {
 	return conn.TokenExpiresAt != nil && !conn.TokenExpiresAt.After(s.now().Add(tokenRefreshSkew))
 }
 
 // refreshConnectionIfNeeded refreshes conn's tokens when they are about to
 // expire. Refreshes of one saved connection are serialized across the cluster
-// because refresh tokens can be single-use: Trakt spends one on each refresh,
-// so a second caller holding the same token would be refused. A caller that
-// waited on the lock continues from the stored tokens, which the previous
-// holder has usually just refreshed.
+// because refresh tokens can be single-use: a provider that spends one on each
+// refresh refuses a second caller holding the same token. A caller that waited
+// on the lock continues from the stored tokens, which the previous holder has
+// usually just refreshed.
 func (s *Service) refreshConnectionIfNeeded(ctx context.Context, provider Provider, cfg ServerConfig, conn Connection) (Connection, error) {
 	if !s.tokenNeedsRefresh(conn) {
 		return conn, nil
@@ -2350,7 +2320,7 @@ func scrobbleDispatchKey(scrobbler Scrobbler, conn Connection, event ScrobbleEve
 
 func (s *Service) enqueueOrderedScrobble(key string, dispatch func()) {
 	value, _ := s.scrobbleQueues.LoadOrStore(key, &scrobbleQueue{})
-	queue := value.(*scrobbleQueue)
+	queue := value.(*scrobbleQueue) //nolint:errcheck,forcetypeassert // scrobbleQueues stores only *scrobbleQueue
 
 	queue.mu.Lock()
 	previous := queue.tail

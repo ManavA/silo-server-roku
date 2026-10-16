@@ -169,10 +169,14 @@ export function routePicture(picture: EnginePicture): PictureRoute {
 }
 
 interface PresenterPipelines {
+  /** The render target format the pipelines draw into. */
+  format: GPUTextureFormat;
   external: GPURenderPipeline;
+  copied: GPURenderPipeline;
   planes: GPURenderPipeline;
   params: GPUBindGroupLayout;
   externalPicture: GPUBindGroupLayout;
+  copiedPicture: GPUBindGroupLayout;
   planePictures: GPUBindGroupLayout;
 }
 
@@ -207,6 +211,11 @@ async function createPresenterPipelines(
   const externalPicture = device.createBindGroupLayout({
     entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, externalTexture: {} }],
   });
+  const copiedPicture = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+    ],
+  });
   const planeEntry = (binding: number): GPUBindGroupLayoutEntry => ({
     binding,
     visibility: GPUShaderStage.FRAGMENT,
@@ -222,25 +231,29 @@ async function createPresenterPipelines(
       fragment: { module, entryPoint, targets: [{ format }] },
       primitive: { topology: "triangle-list" },
     });
-  let pipelines: [GPURenderPipeline, GPURenderPipeline] | null = null;
+  let pipelines: [GPURenderPipeline, GPURenderPipeline, GPURenderPipeline] | null = null;
   let failure: unknown = null;
   try {
     pipelines = await Promise.all([
       pipeline(externalPicture, "fragmentExternal"),
+      pipeline(copiedPicture, "fragmentCopied"),
       pipeline(planePictures, "fragmentPlanes"),
     ]);
   } catch (error) {
     failure = error;
   }
   if (!failure && pipelines) {
-    // Every object above feeds the two pipelines, so their success means the
+    // Every object above feeds the pipelines, so their success means the
     // scope is clean. Its answer can take a second on some drivers; not waited for.
     void device.popErrorScope().catch(() => {});
     return {
+      format,
       external: pipelines[0],
-      planes: pipelines[1],
+      copied: pipelines[1],
+      planes: pipelines[2],
       params,
       externalPicture,
+      copiedPicture,
       planePictures,
     };
   }
@@ -387,6 +400,28 @@ async function takeSpare(format: GPUTextureFormat): Promise<PresenterDevice | nu
 
 const UNIFORM_FLOATS = 40;
 
+/** How a GPU-backed frame reaches the shader. */
+type FrameTransfer = "import" | "copy";
+
+type FramePicture = Extract<EnginePicture, { kind: "frame" }>;
+
+/** Side, in pixels, of the square the two ways of drawing a frame are compared at. */
+const FRAME_CHECK_SIZE = 8;
+/**
+ * Mean difference, in 8-bit levels, above which the two ways disagree. Both
+ * apply the same Y'CbCr matrix, so where the import is right they differ by
+ * a level or two of filtering. WebKit's misread 10-bit frames differ by far more.
+ */
+const FRAME_CHECK_TOLERANCE = 6;
+/**
+ * Spread, in 8-bit levels, the copied check picture needs before the check
+ * counts. A dark or flat frame (a fade from black, a title card) comes out
+ * alike both ways even where the import is wrong.
+ */
+const FRAME_CHECK_MIN_SPREAD = 32;
+/** Frames drawn, by copy, before a check that saw too little is tried again. */
+export const FRAME_CHECK_RETRY_FRAMES = 30;
+
 /**
  * Draws pictures with a compiled presenter into any render target: the
  * canvas while playing, a small texture while probing.
@@ -400,6 +435,18 @@ class GPUPresenter {
   private planeTextures: { luma: GPUTexture; cb: GPUTexture; cr: GPUTexture; key: string } | null =
     null;
   private planeBindGroup: GPUBindGroup | null = null;
+  /**
+   * How frames reach the shader. Importing costs nothing, but WebKit imports
+   * 10-bit hardware-decoded frames wrongly, so a frame is drawn both ways and
+   * the results compared (`checkFrameImport`). Until there is an answer, and
+   * wherever the two disagree, frames are copied.
+   */
+  private frameTransfer: FrameTransfer | null = null;
+  private frameChecking = false;
+  /** Frames to draw before the next check; Infinity once checking gave up. */
+  private framesUntilCheck = 0;
+  private copied: { texture: GPUTexture; bindGroup: GPUBindGroup } | null = null;
+  private destroyed = false;
 
   constructor(
     private readonly device: GPUDevice,
@@ -430,6 +477,7 @@ class GPUPresenter {
     }
   }
 
+  /** Draws `picture`; a frame goes the way `transfer` says, or the way found to work. */
   draw(
     picture: EnginePicture,
     size: PictureSize,
@@ -437,7 +485,17 @@ class GPUPresenter {
     target: GPUTextureView,
     width: number,
     height: number,
+    transfer?: FrameTransfer,
   ): void {
+    // Before this draw sets its own uniforms: the check draws with its own.
+    if (picture.kind === "frame" && !transfer && !this.frameTransfer && !this.frameChecking) {
+      if (this.framesUntilCheck > 0) {
+        this.framesUntilCheck -= 1;
+      } else {
+        this.frameChecking = true;
+        void this.checkFrameImport(picture, size);
+      }
+    }
     const rect = videoContentRect(width, height, size.width, size.height, fit);
     const x0 = (rect.x / width) * 2 - 1;
     const x1 = ((rect.x + rect.width) / width) * 2 - 1;
@@ -464,13 +522,22 @@ class GPUPresenter {
       pipeline = this.pipelines.planes;
     } else {
       this.floats.set([0, 0, 0, 0, 0, 0, 1, 1], 12);
-      pictureBindGroup = this.device.createBindGroup({
-        layout: this.pipelines.externalPicture,
-        entries: [
-          { binding: 0, resource: this.device.importExternalTexture({ source: picture.frame }) },
-        ],
-      });
-      pipeline = this.pipelines.external;
+      const copied =
+        (transfer ?? this.frameTransfer ?? "copy") === "copy"
+          ? this.copyFrame(picture.frame)
+          : null;
+      if (copied) {
+        pictureBindGroup = copied;
+        pipeline = this.pipelines.copied;
+      } else {
+        pictureBindGroup = this.device.createBindGroup({
+          layout: this.pipelines.externalPicture,
+          entries: [
+            { binding: 0, resource: this.device.importExternalTexture({ source: picture.frame }) },
+          ],
+        });
+        pipeline = this.pipelines.external;
+      }
     }
     this.device.queue.writeBuffer(this.uniforms, 0, this.data);
 
@@ -532,6 +599,143 @@ class GPUPresenter {
     return this.planeBindGroup!;
   }
 
+  /** Whether `frame` fits in a texture on this device, so that it can be copied. */
+  private fitsTexture(frame: VideoFrame): boolean {
+    const limit = this.device.limits.maxTextureDimension2D;
+    return frame.displayWidth <= limit && frame.displayHeight <= limit;
+  }
+
+  /**
+   * Copies `frame` into the presenter's half-float texture, keeping its
+   * R'G'B' codes. Null where the frame is larger than a texture can be (that
+   * frame is imported), or the browser cannot copy a VideoFrame at all
+   * (Firefox), which leaves importing as the only way.
+   */
+  private copyFrame(frame: VideoFrame): GPUBindGroup | null {
+    if (!this.fitsTexture(frame)) return null;
+    const width = frame.displayWidth;
+    const height = frame.displayHeight;
+    if (
+      !this.copied ||
+      this.copied.texture.width !== width ||
+      this.copied.texture.height !== height
+    ) {
+      this.copied?.texture.destroy();
+      const texture = this.device.createTexture({
+        size: [width, height],
+        format: "rgba16float",
+        usage:
+          GPUTextureUsage.TEXTURE_BINDING |
+          GPUTextureUsage.COPY_DST |
+          GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      this.copied = {
+        texture,
+        bindGroup: this.device.createBindGroup({
+          layout: this.pipelines.copiedPicture,
+          entries: [{ binding: 0, resource: texture.createView() }],
+        }),
+      };
+    }
+    try {
+      this.device.queue.copyExternalImageToTexture(
+        { source: frame },
+        { texture: this.copied.texture, colorSpace: "srgb" },
+        [width, height],
+      );
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error;
+      this.useImport();
+      return null;
+    }
+    return this.copied.bindGroup;
+  }
+
+  /** Imports frames from now on, and lets go of the copy's texture. */
+  private useImport(): void {
+    this.frameTransfer = "import";
+    this.copied?.texture.destroy();
+    this.copied = null;
+  }
+
+  /**
+   * Draws `picture` both ways into small textures and compares them: frames
+   * are imported from then on where the two agree, and copied where not. A
+   * picture with too little in it decides nothing; a later frame is tried.
+   */
+  private async checkFrameImport(picture: FramePicture, size: PictureSize): Promise<void> {
+    if (!this.fitsTexture(picture.frame)) {
+      // A frame that cannot be copied cannot be compared.
+      this.framesUntilCheck = FRAME_CHECK_RETRY_FRAMES;
+      this.frameChecking = false;
+      return;
+    }
+    const side = FRAME_CHECK_SIZE;
+    const target = () =>
+      this.device.createTexture({
+        size: [side, side],
+        format: this.pipelines.format,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+      });
+    const imported = target();
+    const copied = target();
+    try {
+      this.draw(picture, size, "cover", copied.createView(), side, side, "copy");
+      // The browser cannot copy frames: importing is the only way.
+      if (this.frameTransfer === "import") return;
+      this.draw(picture, size, "cover", imported.createView(), side, side, "import");
+      const [a, b] = await Promise.all([this.readBack(imported), this.readBack(copied)]);
+      let difference = 0;
+      let low = 255;
+      let high = 0;
+      for (let pixel = 0; pixel < side * side; pixel++) {
+        const offset = Math.floor(pixel / side) * 256 + (pixel % side) * 4;
+        for (let channel = 0; channel < 3; channel++) {
+          const value = b[offset + channel]!;
+          difference += Math.abs(a[offset + channel]! - value);
+          low = Math.min(low, value);
+          high = Math.max(high, value);
+        }
+      }
+      if (this.destroyed) return;
+      if (high - low < FRAME_CHECK_MIN_SPREAD) {
+        this.framesUntilCheck = FRAME_CHECK_RETRY_FRAMES;
+      } else if (difference / (side * side * 3) > FRAME_CHECK_TOLERANCE) {
+        this.frameTransfer = "copy";
+      } else {
+        this.useImport();
+      }
+    } catch {
+      // Without an answer frames stay copied, which is right everywhere it works.
+      this.framesUntilCheck = Infinity;
+    } finally {
+      this.frameChecking = false;
+      imported.destroy();
+      copied.destroy();
+    }
+  }
+
+  /** The 8-bit pixels of a small render target, rows 256 bytes apart. */
+  private async readBack(texture: GPUTexture): Promise<Uint8Array> {
+    const bytesPerRow = 256;
+    const buffer = this.device.createBuffer({
+      size: bytesPerRow * texture.height,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow }, [
+      texture.width,
+      texture.height,
+    ]);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await buffer.mapAsync(GPUMapMode.READ);
+      return new Uint8Array(buffer.getMappedRange().slice(0));
+    } finally {
+      buffer.destroy();
+    }
+  }
+
   private destroyPlaneTextures(): void {
     this.planeTextures?.luma.destroy();
     this.planeTextures?.cb.destroy();
@@ -541,7 +745,10 @@ class GPUPresenter {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.destroyPlaneTextures();
+    this.copied?.texture.destroy();
+    this.copied = null;
     this.uniforms.destroy();
   }
 }
