@@ -23,6 +23,8 @@ jobs:
   identity:
     runs-on: ubuntu-latest
     if: github.repository == 'ManavA/silo-server-roku' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
         with:
@@ -37,6 +39,24 @@ jobs:
             exit 1
           fi
           test "$(git rev-parse "refs/tags/$VERSION^{commit}")" = "$GITHUB_SHA"
+      - name: Reserve release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # A release, including a draft, is a one-time build reservation. Do
+          # not rebuild mutable dependencies under an existing version or SHA.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[].target_commitish' > "$RUNNER_TEMP/release-sources"
+          if grep -Fxq "$GITHUB_SHA" "$RUNNER_TEMP/release-sources"; then
+            echo '::error::This source commit already has a release build.'
+            exit 1
+          fi
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --target "$GITHUB_SHA" --draft --prerelease \
+            --title "Silo Roku Server $VERSION" \
+            --notes 'Release images are being built and verified.'
 
   build:
     needs: identity
@@ -92,7 +112,18 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           ARCH: ${{ matrix.arch }}
-        run: docker push "$IMAGE:$VERSION-$ARCH"
+        run: |
+          docker push "$IMAGE:$VERSION-$ARCH"
+          mkdir -p digests
+          docker image inspect --format '{{index .RepoDigests 0}}' \
+            "$IMAGE:$VERSION-$ARCH" > "digests/$ARCH.txt"
+          grep -Eq '^ghcr.io/manava/silo-server-roku@sha256:[a-f0-9]{64}$' "digests/$ARCH.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/*.txt
+          if-no-files-found: error
+          retention-days: 7
       - name: Export portable image
         env:
           VERSION: ${{ inputs.version }}
@@ -120,11 +151,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
       - name: Publish multi-platform release
         env:
           VERSION: ${{ inputs.version }}
         run: |
           docker buildx imagetools create \
             -t "$IMAGE:$VERSION" -t "$IMAGE:roku" -t "$IMAGE:${GITHUB_SHA}" \
-            "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
+            "$(cat digests/amd64.txt)" "$(cat digests/arm64.txt)"
           docker buildx imagetools inspect "$IMAGE:$VERSION"

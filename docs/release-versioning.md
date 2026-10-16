@@ -3,7 +3,11 @@
 > numbers. The `Roku release images` workflow verifies the tag matches the selected
 > default-branch commit, builds native amd64/arm64 images with bundled dovi_tool and its
 > license, checks the runtime tools, and only then merges the image manifests.
-> Version, full commit SHA and `roku` tags identify the result. Portable images
+> A draft release reserves each version and source commit before building;
+> redispatching a reserved identity is refused. A failed build keeps its draft
+> and needs a new source commit/version unless a maintainer deliberately removes
+> the incomplete reservation. Manifests use captured image digests, not mutable
+> architecture tags. Version, full commit SHA and `roku` tags identify the result. Portable images
 > are retained as workflow artifacts for attaching to the matching GitHub Release.
 > `packaging/roku/` contains the standalone Compose bundle templates; setup and
 > upgrade instructions belong in that release. Inherited upstream automation is
