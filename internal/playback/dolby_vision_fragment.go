@@ -238,7 +238,7 @@ func convertDV7AnnexB(ctx context.Context, toolPath string, data []byte) ([]byte
 	if err := os.WriteFile(input, data, 0600); err != nil {
 		return nil, err
 	}
-	// #nosec G204 -- toolPath is the server-probed converter executable; arguments use private temporary files, without a shell.
+	// #nosec G204 G702 -- toolPath is resolved from the server PATH; arguments use private temporary files without a shell.
 	cmd := exec.CommandContext(ctx, toolPath, "-m", "2", "convert", "--discard", "-i", input, "-o", output)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
