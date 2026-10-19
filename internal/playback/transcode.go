@@ -137,6 +137,14 @@ type TranscodeOpts struct {
 	// filter_complex pipeline; text codecs use the libass subtitles filter.
 	// Empty preserves the legacy text path for callers minted before the field.
 	SubtitleCodec string
+	// SubtitleRendition emits the selected embedded text track
+	// (SubtitleTrackIndex, never burned in) from this same ffmpeg process as
+	// the WebVTT subtitle rendition of the synthetic HLS playlist. See
+	// subtitle_rendition.go.
+	SubtitleRendition bool
+	// subtitleCueFile is the per-generation cue file the rendition output
+	// writes. Process-local: every start and restart derives its own.
+	subtitleCueFile string
 	// PreparedTracks selects the multi-track stream layout of a prepared
 	// download (PrepareFile only). Nil keeps the legacy single-audio,
 	// subtitle-free layout that older artifacts were encoded with.
@@ -280,6 +288,12 @@ type TranscodeSession struct {
 	// copyPlan is the planned segment list served instead of FFmpeg's
 	// playlist, or nil. It is fixed when the session starts.
 	copyPlan *copySegmentPlan
+	// subtitleSpans lists each generation's subtitle rendition cue file,
+	// oldest first. Guarded by mu.
+	subtitleSpans []subtitleCueSpan
+	// subtitleOriginMu serializes observations of a span's origin, so
+	// concurrent subtitle requests share one ffprobe run.
+	subtitleOriginMu sync.Mutex
 }
 
 // NewTranscodeSessionForTest exposes only the output directory needed by tests
@@ -469,6 +483,9 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	// context. Once it succeeds, keep the established behavior where the
 	// transcode process outlives a disconnected manifest request.
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	if subtitleRenditionActive(opts) {
+		opts.subtitleCueFile = subtitleCueFileName(0)
+	}
 	s := &TranscodeSession{
 		dvContext: ctx, dvToolPath: dvToolPath, dvInheritedManifest: statManifest(filepath.Join(opts.OutputDir, dv7SourceDirectory)),
 		cancel:               cancel,
@@ -521,6 +538,7 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	s.stdinPipe = stdinPipe
 	s.generationStartedAt = startedAt
 	s.inheritedManifest = inheritedManifest
+	s.startSubtitleSpanLocked(opts)
 	s.logFFmpegEvent(ctx, "ffmpeg process started", "")
 
 	// Monitor ffmpeg in background. The process-specific reservation is released
@@ -965,6 +983,7 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	if opts.SeparateAudioHLS {
 		args = appendSeparateAudioHLSArgs(args, opts)
 	}
+	args = appendSubtitleRenditionOutputArgs(args, opts)
 
 	return args
 }
@@ -2282,6 +2301,9 @@ func (s *TranscodeSession) BuildPlaybackManifest(segPrefix, rawQuery string) ([]
 	if s.copyPlan != nil {
 		return s.copyPlan.manifest(opts, segPrefix, rawQuery), nil
 	}
+	if s.HasSubtitleRendition() {
+		return s.buildSubtitleRenditionPlaylist(segPrefix, rawQuery), nil
+	}
 	if strings.EqualFold(opts.TargetCodecVideo, "copy") ||
 		!CanGenerateSyntheticManifest(opts.TotalDuration, opts.SegmentDuration) {
 		// Copy-video, unknown-duration, or oversized sessions must use FFmpeg's
@@ -2905,6 +2927,26 @@ func (s *TranscodeSession) SegmentRecoveryDecision(segNum int, now time.Time) Se
 // segPrefix is prepended to each segment filename (e.g. "segment/") and
 // rawQuery is appended as a query string (e.g. auth tokens).
 func (s *TranscodeSession) GenerateFullManifest(segPrefix, rawQuery string) []byte {
+	segExt := hlsSegmentExtension(s.Opts())
+	return s.generateSyntheticPlaylist(segPrefix, rawQuery, "seg_", segExt, segExt == ".m4s")
+}
+
+// syntheticSegmentCount is the number of fixed-duration segments the
+// synthetic playlist lists for the media.
+func syntheticSegmentCount(totalDuration float64, segmentDuration int) int {
+	if segmentDuration <= 0 {
+		segmentDuration = defaultSegmentDuration
+	}
+	if totalDuration <= 0 {
+		totalDuration = float64(segmentDuration) // fallback: single segment
+	}
+	return max(1, int(math.Ceil(totalDuration/float64(segmentDuration))))
+}
+
+// generateSyntheticPlaylist lists every fixed-duration segment of the media
+// under namePrefix%05d+ext. The video playlist and the subtitle rendition
+// playlist share it, so both carry exactly the same segment timeline.
+func (s *TranscodeSession) generateSyntheticPlaylist(segPrefix, rawQuery, namePrefix, segExt string, initMap bool) []byte {
 	opts := s.Opts()
 	totalDur := opts.TotalDuration
 	segDur := opts.SegmentDuration
@@ -2914,17 +2956,12 @@ func (s *TranscodeSession) GenerateFullManifest(segPrefix, rawQuery string) []by
 	if totalDur <= 0 {
 		totalDur = float64(segDur) // fallback: single segment
 	}
-
-	segCount := int(math.Ceil(totalDur / float64(segDur)))
-	if segCount < 1 {
-		segCount = 1
-	}
+	segCount := syntheticSegmentCount(totalDur, segDur)
 
 	queryDefinition, suffix, queryVersion := syntheticManifestQuery(segCount, rawQuery)
 
-	segExt := hlsSegmentExtension(opts)
 	hlsVersion := 3
-	if segExt == ".m4s" {
+	if initMap {
 		hlsVersion = 7
 	}
 	if queryVersion > hlsVersion {
@@ -2939,7 +2976,7 @@ func (s *TranscodeSession) GenerateFullManifest(segPrefix, rawQuery string) []by
 	buf.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
 	buf.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
 
-	if segExt == ".m4s" {
+	if initMap {
 		buf.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"%sinit.mp4%s\"\n", segPrefix, suffix))
 	}
 
@@ -2953,7 +2990,7 @@ func (s *TranscodeSession) GenerateFullManifest(segPrefix, rawQuery string) []by
 			}
 		}
 		buf.WriteString(fmt.Sprintf("#EXTINF:%.6f,\n", dur))
-		buf.WriteString(fmt.Sprintf("%sseg_%05d%s%s\n", segPrefix, i, segExt, suffix))
+		fmt.Fprintf(&buf, "%s%s%05d%s%s\n", segPrefix, namePrefix, i, segExt, suffix)
 	}
 
 	buf.WriteString("#EXT-X-ENDLIST\n")
@@ -3162,7 +3199,7 @@ func (s *TranscodeSession) cleanStaleSegments(startSegment int) {
 			os.Remove(filepath.Join(s.outputDir, name))
 			continue
 		}
-		if name == "init.mp4" {
+		if name == hlsInitSegmentName {
 			continue
 		}
 		segNum, parseErr := ParseSegmentNumber(name)
@@ -3360,6 +3397,7 @@ func (s *TranscodeSession) restart(
 	if done != nil {
 		<-done
 	}
+	s.closeSubtitleSpan()
 
 	// A planned stream's segments only match its playlist when FFmpeg cuts
 	// them from the beginning, so it always restarts there. The requested
@@ -3413,6 +3451,11 @@ func (s *TranscodeSession) restart(
 		opts.CopySeekAnchorResolved = copySeekAnchorResolved
 	}
 	opts.FastStart = false // seek-restarts use veryfast for better quality
+	if subtitleRenditionActive(opts) {
+		s.mu.Lock()
+		opts.subtitleCueFile = subtitleCueFileName(s.segmentGeneration)
+		s.mu.Unlock()
+	}
 
 	// Old segments are only reusable when this generation emits the same recipe
 	// as the previous one; otherwise they, and the manifest describing them,
@@ -3496,6 +3539,7 @@ func (s *TranscodeSession) restart(
 	s.lastCompletedSegment = startSegment - 1
 	s.generationStartedAt = startedAt
 	s.inheritedManifest = inheritedManifest
+	s.startSubtitleSpanLocked(opts)
 	s.done = make(chan struct{})
 	hook := s.restartHook
 	s.mu.Unlock()
@@ -3669,10 +3713,10 @@ func rewriteMapURI(line []byte, segPrefix, suffix string) ([]byte, error) {
 }
 
 // AppendManifestQueryParam appends a single "key=value" query parameter to every
-// segment and #EXT-X-MAP init URI in an HLS media playlist, preserving any query
-// the URI already carries (using "?" or "&" as appropriate). The value is
-// appended verbatim — callers must supply a URL-safe value (a signed stream token
-// is base64url and safe). A manifest without a valid #EXTM3U header is returned
+// segment, variant, #EXT-X-MAP init, and #EXT-X-MEDIA rendition URI in an HLS
+// playlist, preserving any query the URI already carries (using "?" or "&" as
+// appropriate). The value is appended verbatim — callers must supply a URL-safe
+// value (a signed stream token is base64url and safe). A manifest without a valid #EXTM3U header is returned
 // unchanged so a non-manifest body is never corrupted.
 //
 // It exists for the API proxy boundary: a transcode node builds its manifest from
@@ -3692,6 +3736,8 @@ func AppendManifestQueryParam(manifest []byte, key, value string) []byte {
 		if len(trimmed) == 0 {
 			continue
 		}
+		// Rendition playlists carry their URI in an EXT-X-MEDIA attribute,
+		// just as init segments carry theirs in EXT-X-MAP.
 		if bytes.HasPrefix(trimmed, []byte("#EXT-X-MAP:")) || bytes.HasPrefix(trimmed, []byte("#EXT-X-MEDIA:")) {
 			lines[i] = appendMapURIQueryParam(trimmed, param)
 			continue

@@ -1692,7 +1692,15 @@ func (h *ItemsHandler) HandleGenres(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	total := len(items)
+	// Jellyfin returns every genre when Limit is absent and none for Limit=0;
+	// parseItemsQuery's default page size is for item browsing.
+	if query.limitDefaulted {
+		query.limit = total
+	}
 	items = slicePage(items, query.startIndex, query.limit)
+	if query.countOnly {
+		items = []baseItemDTO{}
+	}
 	if !query.enableTotalRecordCount {
 		total = 0
 	}
@@ -2911,7 +2919,13 @@ func (h *ItemsHandler) handleSearchItems(w http.ResponseWriter, r *http.Request,
 }
 
 func (h *ItemsHandler) handleSpecificItems(w http.ResponseWriter, r *http.Request, session *Session, query itemsQuery) {
+	// Jellyfin returns every named item when Limit is absent, so neither path
+	// below applies parseItemsQuery's default page size, which is for item
+	// browsing. The catalog browse still caps a page at compatBrowseMaxLimit.
 	if len(query.specificCollectionIDs) == 0 && !idsRequestCollectionsView(r) && (query.hasIntersectingFilters() || query.hasItemTypeFilter || query.isFavorite || query.isPlayed != nil || query.isResumable || query.searchTerm != "" || query.sortExplicit) {
+		if query.limitDefaulted {
+			query.limit = len(query.specificIDs)
+		}
 		h.handleBrowseItems(w, r, session, query)
 		return
 	}
@@ -2988,6 +3002,9 @@ func (h *ItemsHandler) handleSpecificItems(w http.ResponseWriter, r *http.Reques
 	total := len(items)
 	if !query.enableTotalRecordCount {
 		total = 0
+	}
+	if query.limitDefaulted {
+		query.limit = len(items)
 	}
 	items = slicePage(items, query.startIndex, query.limit)
 	h.applyListFileFields(r.Context(), session, items, query)
