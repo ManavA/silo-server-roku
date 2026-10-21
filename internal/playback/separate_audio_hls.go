@@ -123,38 +123,50 @@ func prepareSeparateAudioTimestampOffset(ctx context.Context, opts TranscodeOpts
 	if opts.SeekSeconds > 0 {
 		interval = fmt.Sprintf("%.6f%%+#128", opts.SeekSeconds)
 	}
-	command := exec.CommandContext(probeCtx, ffprobePathFromFFmpeg(ResolveFFmpegPath(opts.FFmpegPath)), //nolint:gosec // G204: server-configured executable; catalog/executor input path and numeric seek are passed as arguments without a shell.
-		"-v", "error", "-read_intervals", interval,
-		"-show_entries", "packet=stream_index,dts_time,duration_time:packet_side_data=skip_samples:stream=index,codec_type,sample_rate:format=start_time", "-of", "json", opts.InputPath)
-	output, err := command.Output()
+	// Budget packets per selected stream: dense lossless audio can otherwise
+	// exhaust a global packet limit before reordered video exposes its DTS.
+	probe := func(stream string) (separateAudioTimestampReport, error) {
+		command := exec.CommandContext(probeCtx, ffprobePathFromFFmpeg(ResolveFFmpegPath(opts.FFmpegPath)), //nolint:gosec // G204: server-configured executable and catalog input; no shell.
+			"-v", "error", "-select_streams", stream, "-read_intervals", interval,
+			"-show_entries", "packet=stream_index,dts_time,duration_time:packet_side_data=skip_samples:stream=index,codec_type,sample_rate:format=start_time", "-of", "json", opts.InputPath)
+		output, err := command.Output()
+		if err != nil {
+			return separateAudioTimestampReport{}, fmt.Errorf("separate-audio timestamp probe failed: %w", err)
+		}
+		var report separateAudioTimestampReport
+		if json.Unmarshal(output, &report) != nil {
+			return report, errors.New("separate-audio timestamp evidence is unavailable")
+		}
+		return report, nil
+	}
+	videoReport, err := probe("v:0")
 	if err != nil {
-		return opts, fmt.Errorf("separate-audio timestamp probe failed: %w", err)
+		return opts, err
 	}
-	var report separateAudioTimestampReport
-	if json.Unmarshal(output, &report) != nil {
-		return opts, errors.New("separate-audio timestamp evidence is unavailable")
+	audioReport, err := probe(fmt.Sprintf("a:%d", max(0, opts.AudioTrackIndex)))
+	if err != nil {
+		return opts, err
 	}
-	start, err := strconv.ParseFloat(report.Format.Start, 64)
-	if err != nil || math.IsNaN(start) || math.IsInf(start, 0) {
+	start, err := strconv.ParseFloat(videoReport.Format.Start, 64)
+	audioStart, audioStartErr := strconv.ParseFloat(audioReport.Format.Start, 64)
+	if err != nil || math.IsNaN(start) || math.IsInf(start, 0) || audioStartErr != nil || audioStart != start {
 		return opts, errors.New("unsupported separate-audio timestamp evidence")
 	}
 	videoIndex, audioIndex := -1, -1
-	audioOrdinal := 0
 	audioRate := 0.0
-	for _, stream := range report.Streams {
+	for _, stream := range videoReport.Streams {
 		if stream.Kind == hlsVideoRendition && videoIndex < 0 {
 			videoIndex = stream.Index
 		}
-		if stream.Kind == hlsAudioRendition {
-			if audioOrdinal == max(0, opts.AudioTrackIndex) {
-				audioIndex = stream.Index
-				audioRate, _ = strconv.ParseFloat(stream.SampleRate, 64)
-			}
-			audioOrdinal++
+	}
+	for _, stream := range audioReport.Streams {
+		if stream.Kind == hlsAudioRendition && audioIndex < 0 {
+			audioIndex = stream.Index
+			audioRate, _ = strconv.ParseFloat(stream.SampleRate, 64)
 		}
 	}
-	videoDTS, videoOK := report.initialDTS(videoIndex)
-	audioDTS, audioOK := report.initialDTS(audioIndex)
+	videoDTS, videoOK := videoReport.initialDTS(videoIndex)
+	audioDTS, audioOK := audioReport.initialDTS(audioIndex)
 	if !videoOK || !audioOK {
 		return opts, errors.New("unsupported separate-audio timestamp evidence")
 	}
@@ -164,7 +176,7 @@ func prepareSeparateAudioTimestampOffset(ctx context.Context, opts TranscodeOpts
 		if audioRate < 8000 || audioRate > 192000 || math.IsNaN(audioRate) || math.IsInf(audioRate, 0) {
 			return opts, errors.New("unsupported separate-audio sample rate")
 		}
-		for _, packet := range report.Packets {
+		for _, packet := range audioReport.Packets {
 			if packet.StreamIndex != audioIndex {
 				continue
 			}
