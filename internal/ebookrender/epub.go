@@ -445,12 +445,15 @@ func preflightZIP(raw []byte) error {
 	const endSize = 22
 	end := -1
 	for i := len(raw) - endSize; i >= max(0, len(raw)-endSize-65535); i-- {
-		if binary.LittleEndian.Uint32(raw[i:i+4]) == 0x06054b50 && i+endSize+int(binary.LittleEndian.Uint16(raw[i+20:i+22])) == len(raw) {
+		if binary.LittleEndian.Uint32(raw[i:i+4]) == 0x06054b50 {
 			end = i
 			break
 		}
 	}
-	if end < 0 {
+	// Reject even a truncated later signature: archive/zip may select a later
+	// candidate whose comment merely fits rather than reaching EOF. Requiring
+	// the last signature to reach EOF binds both parsers to this directory.
+	if end < 0 || end+endSize+int(binary.LittleEndian.Uint16(raw[end+20:end+22])) != len(raw) {
 		return ErrInvalid
 	}
 	e := raw[end:]

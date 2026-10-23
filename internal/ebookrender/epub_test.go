@@ -78,7 +78,7 @@ func TestRejectUnsafeAndUnsupportedEPUB(t *testing.T) {
 		"aliased spine amplification": {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="alias" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/><itemref idref="alias"/></spine></package>`},
 		"repeated spine":              {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/><itemref idref="one"/></spine></package>`},
 		"malformed XHTML":             {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>bad</body></html>`},
-		"multiple roots":              {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body/></html><html xmlns="http://www.w3.org/1999/xhtml"><body/></html>`},
+		"multiple roots":              {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body/></html><html xmlns="http://www.w3.org/1999/xhtml"/>`},
 		"DTD":                         {"OPS/one.xhtml": `<!DOCTYPE html [<!ENTITY e SYSTEM "file:///etc/passwd">]><html><body>&e;</body></html>`},
 		"external image":              {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="https://example.invalid/a"/></body></html>`},
 		"fixed layout":                {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><metadata><meta property="rendition:layout">pre-paginated</meta></metadata><manifest/><spine/></package>`},
@@ -183,7 +183,7 @@ func TestXMLDefensesAfterValidXHTMLRoot(t *testing.T) {
 		want error
 	}{
 		{`<html xmlns="http://www.w3.org/1999/xhtml"><body>` + strings.Repeat("<span>", 129) + strings.Repeat("</span>", 129) + `</body></html>`, ebookrender.ErrLimit},
-		{`<html xmlns="http://www.w3.org/1999/xhtml"><body/></html><html xmlns="http://www.w3.org/1999/xhtml"><body/></html>`, ebookrender.ErrInvalid},
+		{`<html xmlns="http://www.w3.org/1999/xhtml"><body/></html><html xmlns="http://www.w3.org/1999/xhtml"/>`, ebookrender.ErrInvalid},
 	}
 	for _, tc := range cases {
 		data := epub(t, map[string]string{"OPS/one.xhtml": tc.text})
@@ -201,5 +201,19 @@ func TestAllHeadingLevelsKeepTextSeparate(t *testing.T) {
 	}
 	if book.Chapters[0].Text != "Four\nFive\nSix\nAfter" {
 		t.Fatalf("headings merged: %q", book.Chapters[0].Text)
+	}
+}
+
+func TestRejectAmbiguousEndRecordInsideZIPComment(t *testing.T) {
+	inner := epub(t, nil)
+	original := epub(t, nil)
+	// The genuine EOCD comment reaches EOF, but the nested archive's later EOCD
+	// has a zero comment length with trailing bytes. archive/zip selects the latter.
+	end := len(original) - 22
+	comment := append(append([]byte(nil), inner...), []byte("tail")...)
+	binary.LittleEndian.PutUint16(original[end+20:], uint16(len(comment)))
+	data := append(original, comment...)
+	if _, err := ebookrender.Parse(context.Background(), bytes.NewReader(data), int64(len(data))); err == nil {
+		t.Fatal("accepted ambiguous directory end records")
 	}
 }
