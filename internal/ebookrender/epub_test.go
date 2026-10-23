@@ -217,3 +217,35 @@ func TestRejectAmbiguousEndRecordInsideZIPComment(t *testing.T) {
 		t.Fatal("accepted ambiguous directory end records")
 	}
 }
+
+func TestRejectZIP64DiscoverySizeSentinel(t *testing.T) {
+	original := epub(t, nil)
+	end := len(original) - 22
+	directoryBytes := int(binary.LittleEndian.Uint32(original[end+12 : end+16]))
+	zr, err := zip.NewReader(bytes.NewReader(original), int64(len(original)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	w := zip.NewWriter(&b)
+	for _, f := range zr.File {
+		if err := w.Copy(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// archive/zip treats 0xffff (not only 0xffffffff) as a ZIP64 discovery
+	// sentinel for directory size. Reject it even without a ZIP64 locator.
+	if _, err := w.Create(strings.Repeat("x", 0xffff-directoryBytes-46)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := b.Bytes()
+	if got := binary.LittleEndian.Uint32(data[len(data)-10 : len(data)-6]); got != 0xffff {
+		t.Fatalf("fixture directory size: %d", got)
+	}
+	if _, err := ebookrender.Parse(context.Background(), bytes.NewReader(data), int64(len(data))); !errors.Is(err, ebookrender.ErrUnsupported) {
+		t.Fatalf("ZIP64 discovery sentinel: %v", err)
+	}
+}

@@ -469,7 +469,9 @@ func preflightZIP(raw []byte) error {
 	}
 	length := uint64(binary.LittleEndian.Uint32(e[12:16]))
 	offset := uint64(binary.LittleEndian.Uint32(e[16:20]))
-	if length == 0xffffffff || offset == 0xffffffff {
+	// Match archive/zip's ZIP64 discovery sentinels, including its 16-bit
+	// directory-size sentinel; no locator may redirect the checked directory.
+	if length == 0xffff || length == 0xffffffff || offset == 0xffffffff {
 		return ErrUnsupported
 	}
 	if offset+length != uint64(end) {
