@@ -2,7 +2,8 @@
 
 `Parse(ctx, readerAt, size)` admits DRM-free, reflowable EPUB archives and returns
 spine-ordered normalized XHTML body text. It does not write files or fetch any
-resource. The package is not wired to an API or an advertised capability.
+resource. The v2 ebook text-pages endpoint calls this package after profile-scoped authorization;
+its `text_pages` capability advertises this opt-in representation.
 
 A central-directory preflight counts actual ZIP records before the ZIP reader
 allocates entries; ZIP64 and multi-disk archives are outside this subset.
@@ -29,5 +30,6 @@ Locations use `silo-text-v1:<archive-sha256>:<spine-index>:<rune-offset>` over
 normalized text. They are stable for the same archive and extraction version and
 independent of chunk size. They are not interoperable EPUB CFI, do not survive an
 archive revision, and must never replace existing browser-reader CFI progress.
-An API integration still needs authorization, revision/layout negotiation,
-location resolution, bounded scheduling and explicit capability negotiation.
+The API integration uses fixed-size chunks, revision-bearing locations, a parser
+deadline and bounded scheduling. Location resolution and measured layout remain
+outside this foundation.
