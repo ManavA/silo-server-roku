@@ -4,6 +4,9 @@
 spine-ordered normalized XHTML body text. It does not write files or fetch any
 resource. The package is not wired to an API or an advertised capability.
 
+A central-directory preflight counts actual ZIP records before the ZIP reader
+allocates entries; ZIP64 and multi-disk archives are outside this subset.
+
 Admission limits are 32 MiB compressed, 1,024 entries, 4 MiB per expanded entry,
 32 MiB total expanded, and XML nesting depth 128. Archive names and manifest
 references must be canonical relative paths; encoded, absolute, parent traversal,

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -77,11 +78,11 @@ func TestRejectUnsafeAndUnsupportedEPUB(t *testing.T) {
 		"aliased spine amplification": {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="alias" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/><itemref idref="alias"/></spine></package>`},
 		"repeated spine":              {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/><itemref idref="one"/></spine></package>`},
 		"malformed XHTML":             {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>bad</body></html>`},
-		"multiple roots":              {"OPS/one.xhtml": `<html/><html/>`},
+		"multiple roots":              {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body/></html><html xmlns="http://www.w3.org/1999/xhtml"><body/></html>`},
 		"DTD":                         {"OPS/one.xhtml": `<!DOCTYPE html [<!ENTITY e SYSTEM "file:///etc/passwd">]><html><body>&e;</body></html>`},
 		"external image":              {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="https://example.invalid/a"/></body></html>`},
 		"fixed layout":                {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><metadata><meta property="rendition:layout">pre-paginated</meta></metadata><manifest/><spine/></package>`},
-		"deep XML":                    {"OPS/one.xhtml": strings.Repeat("<a>", 129) + strings.Repeat("</a>", 129)},
+		"deep XML":                    {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body>` + strings.Repeat("<a>", 129) + strings.Repeat("</a>", 129) + `</body></html>`},
 		"large entry":                 {"unused": strings.Repeat("a", ebookrender.MaxEntryBytes+1)},
 	}
 	for name, override := range cases {
@@ -152,5 +153,53 @@ func TestPageLimits(t *testing.T) {
 		if _, err := book.Pages(size); !errors.Is(err, ebookrender.ErrLimit) {
 			t.Fatalf("size %d: %v", size, err)
 		}
+	}
+}
+
+func TestRejectEntryFloodBeforeZIPReaderAllocation(t *testing.T) {
+	var b bytes.Buffer
+	w := zip.NewWriter(&b)
+	for i := 0; i < ebookrender.MaxEntries+1; i++ {
+		if _, err := w.Create(fmt.Sprintf("entry%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := b.Bytes()
+	// Lie about the entry count: a guard must count actual directory records.
+	end := len(data) - 22
+	binary.LittleEndian.PutUint16(data[end+8:], 1)
+	binary.LittleEndian.PutUint16(data[end+10:], 1)
+	if _, err := ebookrender.Parse(context.Background(), bytes.NewReader(data), int64(len(data))); !errors.Is(err, ebookrender.ErrLimit) {
+		t.Fatalf("entry flood: %v", err)
+	}
+}
+
+func TestXMLDefensesAfterValidXHTMLRoot(t *testing.T) {
+	cases := []struct {
+		text string
+		want error
+	}{
+		{`<html xmlns="http://www.w3.org/1999/xhtml"><body>` + strings.Repeat("<span>", 129) + strings.Repeat("</span>", 129) + `</body></html>`, ebookrender.ErrLimit},
+		{`<html xmlns="http://www.w3.org/1999/xhtml"><body/></html><html xmlns="http://www.w3.org/1999/xhtml"><body/></html>`, ebookrender.ErrInvalid},
+	}
+	for _, tc := range cases {
+		data := epub(t, map[string]string{"OPS/one.xhtml": tc.text})
+		if _, err := ebookrender.Parse(context.Background(), bytes.NewReader(data), int64(len(data))); !errors.Is(err, tc.want) {
+			t.Fatalf("want %v got %v", tc.want, err)
+		}
+	}
+}
+
+func TestAllHeadingLevelsKeepTextSeparate(t *testing.T) {
+	data := epub(t, map[string]string{"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body><h4>Four</h4><h5>Five</h5><h6>Six</h6>After</body></html>`})
+	book, err := ebookrender.Parse(context.Background(), bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.Chapters[0].Text != "Four\nFive\nSix\nAfter" {
+		t.Fatalf("headings merged: %q", book.Chapters[0].Text)
 	}
 }

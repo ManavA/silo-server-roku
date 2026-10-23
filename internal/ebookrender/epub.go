@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -79,6 +80,9 @@ func Parse(ctx context.Context, r io.ReaderAt, size int64) (*Book, error) {
 		return nil, err
 	}
 	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err = preflightZIP(raw); err != nil {
 		return nil, err
 	}
 	zr, err := zip.NewReader(bytes.NewReader(raw), size)
@@ -338,14 +342,14 @@ func chapterText(ctx context.Context, data []byte) (string, error) {
 			}
 			if body && skip == 0 {
 				switch v.Name.Local {
-				case "p", "div", "br", "li", "h1", "h2", "h3", "section":
+				case "p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6", "section":
 					block()
 				}
 			}
 		case xml.EndElement:
 			if body && skip == 0 {
 				switch v.Name.Local {
-				case "p", "div", "li", "h1", "h2", "h3", "section":
+				case "p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "section":
 					block()
 				}
 			}
@@ -428,6 +432,68 @@ func validatePackage(ctx context.Context, data []byte) error {
 		return err
 	}
 	if manifest != 1 || spine != 1 {
+		return ErrInvalid
+	}
+	return nil
+}
+
+// preflightZIP counts actual central-directory records before archive/zip can
+// allocate a File for each one. EOCD counts alone are attacker-controlled and
+// archive/zip deliberately compares only their low 16 bits. This bounded EPUB
+// subset admits single-disk ordinary ZIP only (no ZIP64 or prepended executable).
+func preflightZIP(raw []byte) error {
+	const endSize = 22
+	end := -1
+	for i := len(raw) - endSize; i >= max(0, len(raw)-endSize-65535); i-- {
+		if binary.LittleEndian.Uint32(raw[i:i+4]) == 0x06054b50 && i+endSize+int(binary.LittleEndian.Uint16(raw[i+20:i+22])) == len(raw) {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return ErrInvalid
+	}
+	e := raw[end:]
+	if binary.LittleEndian.Uint16(e[4:6]) != 0 || binary.LittleEndian.Uint16(e[6:8]) != 0 {
+		return ErrUnsupported
+	}
+	count := int(binary.LittleEndian.Uint16(e[10:12]))
+	if count > MaxEntries {
+		return ErrLimit
+	}
+	if int(binary.LittleEndian.Uint16(e[8:10])) != count {
+		return ErrInvalid
+	}
+	length := uint64(binary.LittleEndian.Uint32(e[12:16]))
+	offset := uint64(binary.LittleEndian.Uint32(e[16:20]))
+	if length == 0xffffffff || offset == 0xffffffff {
+		return ErrUnsupported
+	}
+	if offset+length != uint64(end) {
+		return ErrInvalid
+	}
+	actual := 0
+	for pos := int(offset); pos < end; {
+		if end-pos < 46 || binary.LittleEndian.Uint32(raw[pos:pos+4]) != 0x02014b50 {
+			return ErrInvalid
+		}
+		actual++
+		if actual > MaxEntries {
+			return ErrLimit
+		}
+		name := int(binary.LittleEndian.Uint16(raw[pos+28 : pos+30]))
+		extra := int(binary.LittleEndian.Uint16(raw[pos+30 : pos+32]))
+		comment := int(binary.LittleEndian.Uint16(raw[pos+32 : pos+34]))
+		if binary.LittleEndian.Uint16(raw[pos+34:pos+36]) != 0 {
+			return ErrUnsupported
+		}
+		next := pos + 46 + name + extra + comment
+		if next > end {
+			return ErrInvalid
+		}
+		pos = next
+	}
+	if actual != count {
 		return ErrInvalid
 	}
 	return nil
