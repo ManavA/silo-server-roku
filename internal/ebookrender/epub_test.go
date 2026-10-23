@@ -67,21 +67,22 @@ func TestReadEPUBInSpineOrderAndPaginateUnicode(t *testing.T) {
 
 func TestRejectUnsafeAndUnsupportedEPUB(t *testing.T) {
 	cases := map[string]map[string]string{
-		"archive traversal":        {"../escape": "no"},
-		"absolute archive path":    {"/escape": "no"},
-		"encrypted":                {"META-INF/encryption.xml": "<encryption/>"},
-		"manifest external":        {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="https://example.invalid/a"/></manifest><spine><itemref idref="one"/></spine></package>`},
-		"duplicate manifest":       {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest/><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>`},
-		"wrong manifest namespace": {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest xmlns="urn:wrong"><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>`},
-		"spine missing":            {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest/><spine><itemref idref="missing"/></spine></package>`},
-		"repeated spine":           {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/><itemref idref="one"/></spine></package>`},
-		"malformed XHTML":          {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>bad</body></html>`},
-		"multiple roots":           {"OPS/one.xhtml": `<html/><html/>`},
-		"DTD":                      {"OPS/one.xhtml": `<!DOCTYPE html [<!ENTITY e SYSTEM "file:///etc/passwd">]><html><body>&e;</body></html>`},
-		"external image":           {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="https://example.invalid/a"/></body></html>`},
-		"fixed layout":             {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><metadata><meta property="rendition:layout">pre-paginated</meta></metadata><manifest/><spine/></package>`},
-		"deep XML":                 {"OPS/one.xhtml": strings.Repeat("<a>", 129) + strings.Repeat("</a>", 129)},
-		"large entry":              {"unused": strings.Repeat("a", ebookrender.MaxEntryBytes+1)},
+		"archive traversal":           {"../escape": "no"},
+		"absolute archive path":       {"/escape": "no"},
+		"encrypted":                   {"META-INF/encryption.xml": "<encryption/>"},
+		"manifest external":           {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="https://example.invalid/a"/></manifest><spine><itemref idref="one"/></spine></package>`},
+		"duplicate manifest":          {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest/><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>`},
+		"wrong manifest namespace":    {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest xmlns="urn:wrong"><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>`},
+		"spine missing":               {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest/><spine><itemref idref="missing"/></spine></package>`},
+		"aliased spine amplification": {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="alias" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/><itemref idref="alias"/></spine></package>`},
+		"repeated spine":              {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/><itemref idref="one"/></spine></package>`},
+		"malformed XHTML":             {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>bad</body></html>`},
+		"multiple roots":              {"OPS/one.xhtml": `<html/><html/>`},
+		"DTD":                         {"OPS/one.xhtml": `<!DOCTYPE html [<!ENTITY e SYSTEM "file:///etc/passwd">]><html><body>&e;</body></html>`},
+		"external image":              {"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="https://example.invalid/a"/></body></html>`},
+		"fixed layout":                {"OPS/book.opf": `<package xmlns="http://www.idpf.org/2007/opf"><metadata><meta property="rendition:layout">pre-paginated</meta></metadata><manifest/><spine/></package>`},
+		"deep XML":                    {"OPS/one.xhtml": strings.Repeat("<a>", 129) + strings.Repeat("</a>", 129)},
+		"large entry":                 {"unused": strings.Repeat("a", ebookrender.MaxEntryBytes+1)},
 	}
 	for name, override := range cases {
 		t.Run(name, func(t *testing.T) {

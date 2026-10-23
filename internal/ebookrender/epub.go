@@ -199,6 +199,7 @@ func Parse(ctx context.Context, r io.ReaderAt, size int64) (*Book, error) {
 	sum := sha256.Sum256(raw)
 	book := &Book{Revision: hex.EncodeToString(sum[:])}
 	seenSpine := map[string]bool{}
+	seenTargets := map[string]bool{}
 	for _, ref := range pkg.Spine {
 		if seenSpine[ref.ID] {
 			return nil, ErrInvalid
@@ -208,6 +209,10 @@ func Parse(ctx context.Context, r io.ReaderAt, size int64) (*Book, error) {
 		if !ok {
 			return nil, ErrInvalid
 		}
+		if seenTargets[target] {
+			return nil, ErrInvalid
+		}
+		seenTargets[target] = true
 		for _, item := range pkg.Items {
 			if item.ID == ref.ID && item.Type != "application/xhtml+xml" {
 				return nil, ErrUnsupported
