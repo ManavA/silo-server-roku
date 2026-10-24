@@ -23,7 +23,7 @@ trap 'rm -f "$temporary"' EXIT HUP INT TERM
     printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)"
     printf 'SECRET_KEY=%s\n' "$(openssl rand -base64 48 | tr -d '\n')"
     printf "MEDIA_ROOT='%s'\n" "$media_root"
-    printf '%s\n' 'SILO_IMAGE=ghcr.io/manava/silo-server-roku:v0.1.0-roku.4' 'PORT=8090' 'JF_PORT=8096' 'ABS_PORT=13378'
+    printf '%s\n' 'SILO_IMAGE=ghcr.io/manava/silo-server-roku:v0.1.0-roku.6' 'PORT=8090' 'JF_PORT=8096' 'ABS_PORT=13378'
 } > "$temporary"
 ln "$temporary" .env
 printf '%s\n' 'Created private .env. Start with: docker compose up -d'
