@@ -87,8 +87,10 @@ var compatPathSegments = map[string]string{
 
 func normalizeCompatPathMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// StripSlashes sets RoutePath, which chi matches instead of URL.Path.
-		// Normalize both so lowercase paths with trailing slashes still route.
+		// StripSlashes runs first and, inside a chi router, leaves the stripped
+		// path in RoutePath, which chi then matches instead of r.URL.Path.
+		// Without this, "/items/" (jellyfin-roku's search) would route as
+		// "/items" and 404.
 		if rctx := chi.RouteContext(r.Context()); rctx != nil && rctx.RoutePath != "" {
 			rctx.RoutePath = canonicalizeCompatPath(rctx.RoutePath)
 		}
@@ -143,10 +145,18 @@ func canonicalizeCompatPath(path string) string {
 		return "/QuickConnect/Authorize"
 	case "/users/authenticatewithquickconnect":
 		return "/Users/AuthenticateWithQuickConnect"
+	case "/library/mediafolders":
+		return compatMediaFoldersPath
 	}
 	for i := 1; i < len(parts); i++ {
 		part := parts[i]
 		if part == "" {
+			continue
+		}
+		// The {displayPreferencesId} in /DisplayPreferences/{id} is a
+		// case-sensitive storage key, so it keeps its case even when it reads
+		// like a route word.
+		if i == 2 && strings.EqualFold(parts[1], "displaypreferences") {
 			continue
 		}
 		// LocalTrailers is matched only in its route position,

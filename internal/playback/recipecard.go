@@ -92,6 +92,7 @@ type RecipeCard struct {
 	// this session from a grant produces the same bytes the API would have.
 	DVProfile                  int                    `json:"dv_profile,omitempty"`
 	AudioOnly                  bool                   `json:"audio_only,omitempty"`
+	CopyAudioCodec             string                 `json:"copy_audio_codec,omitempty"`
 	SourceVideoCodec           string                 `json:"source_video_codec,omitempty"`
 	SourceVideoProfile         string                 `json:"source_video_profile,omitempty"`
 	SourceVideoBitDepth        int                    `json:"source_video_bit_depth,omitempty"`
@@ -159,6 +160,33 @@ func (c RecipeCard) EffectiveEncoderHWAccel() string {
 // so binaries predating it reject the card instead of reconstructing old bytes.
 func (c RecipeCard) IsTranscodeRecipe() bool {
 	return c.PlayMethod == "" || c.PlayMethod == PlayTranscode || c.PlayMethod == playMethodCopyFMP4V1
+}
+
+// RecipeExecutor identifies a transcode node by its stream_nodes row id and
+// the route URL stored on that row. Either is zero while the node has not
+// resolved its row.
+type RecipeExecutor struct {
+	NodeID  int
+	NodeURL string
+}
+
+// NamesAnotherNode reports whether card was issued for a different node to
+// run, so that e must not delete it. The API moves a transport to another node
+// under the same transport id, so a stop the old node runs late can find the
+// new node's card stored there. Only a card whose row id and node URL both
+// differ from e's counts: when either side lacks one, or either matches, the
+// card is treated as e's and deleted as it always was, because keeping a card
+// a stop should remove leaves the stopped transport reconstructable. A node
+// whose row or URL changed while it ran a transport therefore still deletes
+// that transport's card.
+func (e RecipeExecutor) NamesAnotherNode(card RecipeCard) bool {
+	nodeURL, cardURL := normalizeExecutorURL(e.NodeURL), normalizeExecutorURL(card.TranscodeNodeURL)
+	return e.NodeID > 0 && card.RoutingExecutionNodeID > 0 && card.RoutingExecutionNodeID != e.NodeID &&
+		nodeURL != "" && cardURL != "" && cardURL != nodeURL
+}
+
+func normalizeExecutorURL(nodeURL string) string {
+	return strings.TrimRight(strings.TrimSpace(nodeURL), "/")
 }
 
 // ValidateCopyFMP4RecipeCard rejects an old copy card under the current
@@ -467,6 +495,7 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		FastStart:                  c.FastStart,
 		ThrottleSeconds:            c.ThrottleSeconds,
 		TargetCodecAudio:           c.TargetCodecAudio,
+		CopyAudioCodec:             c.CopyAudioCodec,
 		TargetAudioChannels:        targetAudioChannels,
 		TargetAudioBitrateKbps:     c.TargetAudioBitrateKbps,
 	}
@@ -551,6 +580,7 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		TargetResolution:              c.TargetRes,
 		TargetCodecVideo:              c.TargetCodec,
 		TargetCodecAudio:              c.TargetCodecAudio,
+		CopyAudioCodec:                c.CopyAudioCodec,
 		TargetAudioChannels:           c.TargetAudioChannels,
 		TargetAudioBitrateKbps:        c.TargetAudioBitrateKbps,
 		SegmentDuration:               c.SegmentDuration,

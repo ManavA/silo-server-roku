@@ -83,7 +83,7 @@ func TestSeparateAudioHLSMasterCarriesFrozenCodecs(t *testing.T) {
 func TestSeparateAudioHLSRecipeSurvivesReconstruction(t *testing.T) {
 	opts := TranscodeOpts{SeparateAudioHLS: true, TargetCodecVideo: "copy", TargetCodecAudio: "copy", SessionID: "fixture"}
 	card := NewRecipeCard(1, "profile", 42, "", opts)
-	restored := RecipeCardFromClaims(ptr(card.ToClaims())).TranscodeOpts(t.TempDir(), "ffmpeg", nil)
+	restored := RecipeCardFromClaims(new(card.ToClaims())).TranscodeOpts(t.TempDir(), "ffmpeg", nil)
 	if !restored.SeparateAudioHLS {
 		t.Fatal("reconstructed route lost separate audio")
 	}

@@ -289,8 +289,17 @@ type TranscodeSession struct {
 	// playlist, or nil. It is fixed when the session starts.
 	copyPlan *copySegmentPlan
 	// subtitleSpans lists each generation's subtitle rendition cue file,
-	// oldest first. Guarded by mu.
+	// oldest first, including those an earlier session recorded in the same
+	// output directory. Guarded by mu.
 	subtitleSpans []subtitleCueSpan
+	// subtitleCueBase is added to segmentGeneration to number cue files, so
+	// a session rebuilt on an output directory never reuses a recorded name.
+	subtitleCueBase uint64
+	// subtitleRecordMu serializes writes of the span record.
+	subtitleRecordMu sync.Mutex
+	// outputRemoved is set once shutdown removes the output directory, so a
+	// late span record write cannot recreate files in it. Guarded by mu.
+	outputRemoved bool
 	// subtitleOriginMu serializes observations of a span's origin, so
 	// concurrent subtitle requests share one ffprobe run.
 	subtitleOriginMu sync.Mutex
@@ -315,7 +324,6 @@ func (s *TranscodeSession) SetRestartHook(fn func(context.Context)) {
 // SegmentProgress describes the media ffmpeg has actually produced on disk.
 type SegmentProgress struct {
 	ProducedHead    int
-	ProducedCount   int
 	LastProducedAt  time.Time
 	ManifestModTime time.Time
 	// GenerationStartedAt is when the ffmpeg process that currently owns the
@@ -483,8 +491,13 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	// context. Once it succeeds, keep the established behavior where the
 	// transcode process outlives a disconnected manifest request.
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	// Read before ffmpeg starts, while the playlist on disk is still the
+	// earlier session's.
+	var subtitleSpans []subtitleCueSpan
+	var subtitleCueBase uint64
 	if subtitleRenditionActive(opts) {
-		opts.subtitleCueFile = subtitleCueFileName(0)
+		subtitleSpans, subtitleCueBase = loadSubtitleSpans(opts)
+		opts.subtitleCueFile = subtitleCueFileName(subtitleCueBase)
 	}
 	s := &TranscodeSession{
 		dvContext: ctx, dvToolPath: dvToolPath, dvInheritedManifest: statManifest(filepath.Join(opts.OutputDir, dv7SourceDirectory)),
@@ -501,6 +514,8 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 		segmentIncarnation:   uuid.NewString(),
 		hwWorkloadDevice:     hwWorkloadDevice,
 		copyPlan:             copyPlan,
+		subtitleSpans:        subtitleSpans,
+		subtitleCueBase:      subtitleCueBase,
 	}
 
 	args := buildFFmpegArgs(opts)
@@ -539,6 +554,7 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	s.generationStartedAt = startedAt
 	s.inheritedManifest = inheritedManifest
 	s.startSubtitleSpanLocked(opts)
+	s.saveSubtitleSpans()
 	s.logFFmpegEvent(ctx, "ffmpeg process started", "")
 
 	// Monitor ffmpeg in background. The process-specific reservation is released
@@ -704,13 +720,15 @@ func validateToneMapOpts(opts TranscodeOpts) error {
 		}
 	case tonemap.ModeHardware:
 		switch opts.HWAccel {
-		case transcodeHWQSV, transcodeHWVAAPI:
-			expected := tonemap.HardwareFilterVAAPI
-			if opts.HWAccel == transcodeHWQSV {
-				expected = tonemap.HardwareFilterOpenCL
+		case transcodeHWQSV:
+			if opts.ToneMapFilter != tonemap.HardwareFilterOpenCL {
+				return fmt.Errorf("unsupported qsv tone-map filter %q", opts.ToneMapFilter)
 			}
-			if opts.ToneMapFilter != expected {
-				return fmt.Errorf("unsupported %s tone-map filter %q", opts.HWAccel, opts.ToneMapFilter)
+		case transcodeHWVAAPI:
+			// The probe picks tonemap_opencl on Intel GPUs, whose own VAAPI
+			// tone mapper gives wrong colors, and tonemap_vaapi elsewhere.
+			if opts.ToneMapFilter != tonemap.HardwareFilterVAAPI && opts.ToneMapFilter != tonemap.HardwareFilterOpenCL {
+				return fmt.Errorf("unsupported vaapi tone-map filter %q", opts.ToneMapFilter)
 			}
 		case transcodeHWNVENC:
 			if opts.ToneMapFilter != tonemap.HardwareFilterCUDA {
@@ -1192,6 +1210,9 @@ func appendHWAccelArgs(args []string, opts TranscodeOpts) []string {
 			vaapiDevice = "/dev/dri/renderD128" // last-resort fallback
 		}
 		args = append(args, tonemap.VAAPIInitDeviceArgs(vaapiHWDeviceAlias, vaapiDevice)...)
+		if opts.ToneMapMode == tonemap.ModeHardware {
+			args = append(args, tonemap.VAAPIOpenCLInitArgs(vaapiHWDeviceAlias, opts.ToneMapFilter, opts.ToneMapSourceKind)...)
+		}
 		args = append(args, "-filter_hw_device", vaapiHWDeviceAlias)
 		if !opts.SoftwareVideoDecode {
 			args = append(args, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
@@ -1513,8 +1534,12 @@ func toneMapScaleFilter(opts TranscodeOpts) string {
 		switch opts.HWAccel {
 		case transcodeHWQSV:
 			height, _ := scaleTargetHeight(opts.TargetResolution)
-			return softwareToneMapUploadFilter(opts) + tonemap.QSVFilter(opts.ToneMapSourceKind, height) + "," + tonemap.QSVInteropFilter() + "," + tonemap.HDRMetadataRemovalFilter()
+			return softwareToneMapUploadFilter(opts) + tonemap.IntelFilter(opts.ToneMapSourceKind, height) + "," + tonemap.QSVInteropFilter() + "," + tonemap.HDRMetadataRemovalFilter()
 		case transcodeHWVAAPI:
+			if vaapiOpenCLToneMap(opts) {
+				height, _ := scaleTargetHeight(opts.TargetResolution)
+				return softwareToneMapUploadFilter(opts) + tonemap.IntelFilter(opts.ToneMapSourceKind, height) + "," + tonemap.HDRMetadataRemovalFilter()
+			}
 			return softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "," + vaapiScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter()
 		case transcodeHWNVENC:
 			if tonemap.IsSDRSource(opts.ToneMapSourceKind) {
@@ -1551,9 +1576,13 @@ func toneMappedTextSubtitleFilter(opts TranscodeOpts) string {
 	}
 	switch opts.HWAccel {
 	case transcodeHWQSV:
-		return softwareToneMapUploadFilter(opts) + tonemap.QSVFilter(opts.ToneMapSourceKind, 0) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload,hwmap=derive_device=qsv:mode=read+write,format=qsv," + tonemap.HDRMetadataRemovalFilter()
+		return softwareToneMapUploadFilter(opts) + tonemap.IntelFilter(opts.ToneMapSourceKind, 0) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload,hwmap=derive_device=qsv:mode=read+write,format=qsv," + tonemap.HDRMetadataRemovalFilter()
 	case transcodeHWVAAPI:
-		return softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload," + tonemap.HDRMetadataRemovalFilter()
+		filter := tonemap.VAAPIFilter(opts.ToneMapSourceKind)
+		if vaapiOpenCLToneMap(opts) {
+			filter = tonemap.IntelFilter(opts.ToneMapSourceKind, 0)
+		}
+		return softwareToneMapUploadFilter(opts) + filter + ",hwdownload,format=nv12," + cpuTail + ",format=nv12,hwupload," + tonemap.HDRMetadataRemovalFilter()
 	case transcodeHWNVENC:
 		if tonemap.IsSDRSource(opts.ToneMapSourceKind) {
 			return nvencSDRFallbackDownload(opts) + "," + tonemap.SoftwareFilter(opts.ToneMapSourceKind, "") + "," + cpuTail + ",format=nv12,hwupload_cuda"
@@ -1584,16 +1613,20 @@ func appendToneMappedBitmapSubtitleArgs(args []string, opts TranscodeOpts) []str
 	switch opts.HWAccel {
 	case transcodeHWQSV:
 		if tonemap.IsSDRSource(opts.ToneMapSourceKind) {
-			graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + tonemap.QSVFilter(opts.ToneMapSourceKind, 0) + "[vmain];" +
+			graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + tonemap.IntelFilter(opts.ToneMapSourceKind, 0) + "[vmain];" +
 				subInput + "format=bgra,hwupload[sub];[vmain][sub]overlay_vaapi=eof_action=pass," +
 				qsvToneMapScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
 		} else {
-			graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + qsvOpenCLBitmapSubtitleGraph(opts, subInput)
+			graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + openCLBitmapSubtitleGraph(opts, subInput)
 		}
 	case transcodeHWVAAPI:
-		graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "[vmain];" +
-			subInput + "format=bgra,hwupload[sub];[vmain][sub]overlay_vaapi=eof_action=pass," +
-			vaapiScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
+		if vaapiOpenCLToneMap(opts) {
+			graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + openCLBitmapSubtitleGraph(opts, subInput)
+		} else {
+			graph = "[0:v:0]" + softwareToneMapUploadFilter(opts) + tonemap.VAAPIFilter(opts.ToneMapSourceKind) + "[vmain];" +
+				subInput + "format=bgra,hwupload[sub];[vmain][sub]overlay_vaapi=eof_action=pass," +
+				vaapiScaleFilter(opts.TargetResolution) + "," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
+		}
 	case transcodeHWNVENC:
 		if tonemap.IsSDRSource(opts.ToneMapSourceKind) {
 			graph = "[0:v:0]" + nvencSDRFallbackDownload(opts) + "," + tonemap.SoftwareFilter(opts.ToneMapSourceKind, "") + "[vmain];[vmain]" + subInput + "overlay=eof_action=pass"
@@ -1615,37 +1648,44 @@ func appendToneMappedBitmapSubtitleArgs(args []string, opts TranscodeOpts) []str
 	return append(args, "-filter_complex", graph)
 }
 
-// qsvOpenCLBitmapSubtitleGraph composites a bitmap subtitle onto an HDR frame
+// openCLBitmapSubtitleGraph composites a bitmap subtitle onto an HDR frame
 // while it is still on the OpenCL device after tone mapping, then scales it
-// there. overlay_vaapi reading the tone-mapped surface corrupts frames the
-// same way a scale_vaapi does (see tonemap.QSVFilter). The subtitle goes on at
-// the source resolution before the scale, as with overlay_vaapi, and its RGB
-// frames are converted with the BT.709 matrix of the tone-mapped frame.
+// there, for QSV and for VAAPI on an Intel GPU. overlay_vaapi reading the
+// tone-mapped surface corrupts frames the same way a scale_vaapi does (see
+// tonemap.IntelFilter). The subtitle goes on at the source resolution before
+// the scale, as with overlay_vaapi, and its RGB frames are converted with the
+// BT.709 matrix of the tone-mapped frame.
 //
 // scale_opencl, overlay_opencl's eof_action and YUVA overlays, and a shared
 // OpenCL device for both hwupload and hwmap come from Jellyfin FFmpeg, which
-// the QSV tone-map path already requires for tonemap_opencl's bt2390 curve.
-// The QSV probe's listing gate checks that both filters exist.
-func qsvOpenCLBitmapSubtitleGraph(opts TranscodeOpts, subInput string) string {
+// the OpenCL tone-map path already requires for tonemap_opencl's bt2390 curve.
+// The probe's listing gate checks that both filters exist.
+func openCLBitmapSubtitleGraph(opts TranscodeOpts, subInput string) string {
 	scale := ""
 	if height, ok := scaleTargetHeight(opts.TargetResolution); ok {
 		scale = fmt.Sprintf("scale_opencl=w=-2:h=%d,", height)
 	}
-	return tonemap.QSVOpenCLToneMapFilter(opts.ToneMapSourceKind, 0) + "[vmain];" +
+	tail := tonemap.IntelOpenCLReturnFilter()
+	if opts.HWAccel == transcodeHWQSV {
+		tail += "," + tonemap.QSVInteropFilter()
+	}
+	return tonemap.IntelOpenCLToneMapFilter(opts.ToneMapSourceKind, 0) + "[vmain];" +
 		subInput + "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p,hwupload=derive_device=opencl[sub];" +
 		"[vmain][sub]overlay_opencl=eof_action=pass," + scale +
-		tonemap.QSVOpenCLReturnFilter() + "," + tonemap.QSVInteropFilter() + "," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
+		tail + "," + tonemap.HDRMetadataRemovalFilter() + "[vout]"
+}
+
+// vaapiOpenCLToneMap reports whether a VAAPI recipe tone maps on OpenCL, as
+// the probe selects on Intel GPUs.
+func vaapiOpenCLToneMap(opts TranscodeOpts) bool {
+	return opts.HWAccel == transcodeHWVAAPI && tonemap.OpenCLToneMaps(opts.ToneMapFilter, opts.ToneMapSourceKind)
 }
 
 // softwareToneMapUploadFilter moves CPU-decoded frames onto the configured
 // Intel or VAAPI device before invoking the selected hardware tone-map graph.
 func softwareToneMapUploadFilter(opts TranscodeOpts) string {
 	if opts.SoftwareVideoDecode && (opts.HWAccel == transcodeHWQSV || opts.HWAccel == transcodeHWVAAPI) {
-		format := "nv12"
-		if !tonemap.IsSDRSource(opts.ToneMapSourceKind) {
-			format = "p010le"
-		}
-		return "format=" + format + ",hwupload,"
+		return tonemap.SoftwareUploadFilter(opts.ToneMapSourceKind)
 	}
 	return ""
 }
@@ -2848,19 +2888,21 @@ func (s *TranscodeSession) SegmentProgress(time.Time) SegmentProgress {
 		return progress
 	}
 
-	for _, entry := range timeline.entries {
-		segmentPath := filepath.Join(producerDir, segmentFilename(entry.number, opts))
-		info, err := os.Stat(segmentPath)
+	// FFmpeg numbers segments in order, renames each finished segment into
+	// place (-hls_flags temp_file) before rewriting the playlist to list it,
+	// and lists only its own segments because append_list is not set. The last
+	// listed segment still on disk is therefore both the highest and the most
+	// recently written, so the walk stops there instead of statting every
+	// entry of a playlist that can list 50,000 segments.
+	for i := len(timeline.entries) - 1; i >= 0; i-- {
+		number := timeline.entries[i].number
+		info, err := os.Stat(filepath.Join(producerDir, segmentFilename(number, opts)))
 		if err != nil || info.Size() <= 0 {
 			continue
 		}
-		progress.ProducedCount++
-		if entry.number > progress.ProducedHead {
-			progress.ProducedHead = entry.number
-		}
-		if info.ModTime().After(progress.LastProducedAt) {
-			progress.LastProducedAt = info.ModTime()
-		}
+		progress.ProducedHead = max(progress.ProducedHead, number)
+		progress.LastProducedAt = info.ModTime()
+		break
 	}
 
 	return progress
@@ -3121,6 +3163,12 @@ func (s *TranscodeSession) shutdown(removeOutput bool) error {
 		<-s.done
 	}
 
+	if removeOutput {
+		// A span record write still in flight (an origin probe can outlive
+		// the request) must finish before the directory goes away.
+		s.subtitleRecordMu.Lock()
+		defer s.subtitleRecordMu.Unlock()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -3130,6 +3178,7 @@ func (s *TranscodeSession) shutdown(removeOutput bool) error {
 
 	// Clean up temporary directory.
 	if removeOutput && s.outputDir != "" {
+		s.outputRemoved = true
 		if err := os.RemoveAll(s.outputDir); err != nil {
 			return fmt.Errorf("remove output dir: %w", err)
 		}
@@ -3453,7 +3502,7 @@ func (s *TranscodeSession) restart(
 	opts.FastStart = false // seek-restarts use veryfast for better quality
 	if subtitleRenditionActive(opts) {
 		s.mu.Lock()
-		opts.subtitleCueFile = subtitleCueFileName(s.segmentGeneration)
+		opts.subtitleCueFile = subtitleCueFileName(s.subtitleCueBase + s.segmentGeneration)
 		s.mu.Unlock()
 	}
 
@@ -3543,6 +3592,7 @@ func (s *TranscodeSession) restart(
 	s.done = make(chan struct{})
 	hook := s.restartHook
 	s.mu.Unlock()
+	s.saveSubtitleSpans()
 	close(flight.done)
 
 	go s.monitorFFmpeg(ctx, cmd, s.done, releaseHWDevice)

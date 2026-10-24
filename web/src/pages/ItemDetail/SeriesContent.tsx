@@ -80,7 +80,7 @@ export default function SeriesContent({
   const crewGroups = useMemo(() => buildCrewGroups(item.crew ?? [], "Creator"), [item.crew]);
 
   const title = item.title ?? "";
-  const firstYear = item.first_air_date?.slice(0, 4);
+  const firstYear = item.first_air_date?.slice(0, 4) ?? (item.year ? String(item.year) : undefined);
   const lastYear = item.last_air_date?.slice(0, 4);
   const yearDisplay = firstYear
     ? lastYear && lastYear !== firstYear
@@ -291,9 +291,10 @@ export default function SeriesContent({
         </>
       }
     >
-      {item.videos && item.videos.length > 0 && <TrailersSection videos={item.videos} />}
-
+      {/* Local extras play in Silo, so they lead; YouTube videos follow. */}
       {item.extras && item.extras.length > 0 && <ExtrasSection extras={item.extras} />}
+
+      {item.videos && item.videos.length > 0 && <TrailersSection videos={item.videos} />}
 
       {((item.cast?.length ?? 0) > 0 || crewGroups.some((g) => g.members.length > 0)) && (
         <DetailSection title="Cast & Crew">

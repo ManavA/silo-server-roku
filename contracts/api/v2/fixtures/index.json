@@ -11907,7 +11907,8 @@
         "method": "POST",
         "path": "/api/v2/notifications/discord/link/init",
         "headers": {
-          "Authorization": "Bearer tok-member"
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-primary"
         }
       },
       "expected_status": 200,
@@ -11922,12 +11923,13 @@
     {
       "name": "notification_discord_mode",
       "operation_id": "updateNotificationDiscordPreferences",
-      "scenario": "A mode mutation reports account state without leaking the linked identity token.",
+      "scenario": "A household manager mode mutation reports account state without leaking the linked identity token.",
       "request": {
         "method": "PUT",
         "path": "/api/v2/notifications/discord-preferences",
         "headers": {
-          "Authorization": "Bearer tok-member"
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-primary"
         },
         "body": "{\"mode\":\"off\"}"
       },
@@ -14438,7 +14440,7 @@
           "Content-Type": "multipart/form-data; boundary=silo-fixture-boundary",
           "X-Profile-Id": "p-owner"
         },
-        "body": "--silo-fixture-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"synthetic.en.srt\"\r\nContent-Type: application/octet-stream\r\n\r\nsynthetic subtitle\r\n--silo-fixture-boundary--\r\n"
+        "body": "--silo-fixture-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"synthetic.en.srt\"\r\nContent-Type: application/octet-stream\r\n\r\n1\r\n00:00:01,000 --> 00:00:02,000\r\nSynthetic line.\r\n\r\n--silo-fixture-boundary--\r\n"
       },
       "expected_status": 200,
       "response_headers": {
@@ -14503,7 +14505,7 @@
           "Content-Type": "multipart/form-data; boundary=silo-fixture-boundary",
           "X-Profile-Id": "p-owner"
         },
-        "body": "--silo-fixture-boundary\r\nContent-Disposition: form-data; name=\"media_file_id\"\r\n\r\n42\r\n--silo-fixture-boundary\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\nen\r\n--silo-fixture-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"synthetic.en.srt\"\r\nContent-Type: application/octet-stream\r\n\r\nsynthetic subtitle\r\n--silo-fixture-boundary--\r\n"
+        "body": "--silo-fixture-boundary\r\nContent-Disposition: form-data; name=\"media_file_id\"\r\n\r\n42\r\n--silo-fixture-boundary\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\nen\r\n--silo-fixture-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"synthetic.en.srt\"\r\nContent-Type: application/octet-stream\r\n\r\n1\r\n00:00:01,000 --> 00:00:02,000\r\nSynthetic line.\r\n\r\n--silo-fixture-boundary--\r\n"
       },
       "expected_status": 200,
       "response_headers": {

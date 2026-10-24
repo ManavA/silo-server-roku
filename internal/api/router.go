@@ -63,6 +63,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/opslog"
 	"github.com/Silo-Server/silo-server/internal/passwordreset"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/playback/connectionstore"
 	"github.com/Silo-Server/silo-server/internal/playback/planstore"
 	"github.com/Silo-Server/silo-server/internal/plugins"
 	"github.com/Silo-Server/silo-server/internal/policy"
@@ -200,7 +201,11 @@ type Dependencies struct {
 	// codes each account tries, shared with the Jellyfin-compatible API's
 	// Authorize route. Nil gets a process-local limiter.
 	QuickConnectCodeAttempts *ratelimit.AttemptLimiter
-	ClientIPResolver         *clientip.Resolver
+	// SignInAttempts bounds password sign-ins per sign-in name, shared with
+	// the Jellyfin and Audiobookshelf sign-ins so every surface counts against
+	// one budget. Nil gets a process-local limiter.
+	SignInAttempts   *ratelimit.AttemptLimiter
+	ClientIPResolver *clientip.Resolver
 	// NetworkAccess is the ingress-token registry and provider status cache
 	// for network access provider plugins on this host. The token middleware
 	// runs on every native request and connected overlay origins are accepted
@@ -276,9 +281,13 @@ type Dependencies struct {
 	v2Wiring               func(apiv2.Dependencies)
 	v2RouteSnapshot        func([]streamtelemetry.WalkedRoute)
 	OnServerSettingUpdated func(ctx context.Context, key, value string)
-	RequestServerRestart   func(ctx context.Context) error
-	StorageTransition      *storagetransition.Service
-	ServerRestartStatus    *handlers.ServerRestartStatusTracker
+	// AdminDefaults is the node's shared snapshot of the administrator's
+	// setting defaults. Without it the router builds one from its settings
+	// repo, which then refreshes only on its own admin writes and its TTL.
+	AdminDefaults        *config.AdminDefaults
+	RequestServerRestart func(ctx context.Context) error
+	StorageTransition    *storagetransition.Service
+	ServerRestartStatus  *handlers.ServerRestartStatusTracker
 
 	// UserCollectionSync handles per-profile imported collections (TMDB /
 	// MDBList) — the user-facing counterpart of CollectionService.
@@ -534,6 +543,16 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	// One reader for access.unrated_content shared by every resolver built here.
 	unratedContent := config.NewUnratedContentPolicy(settingsRepo)
+	adminDefaults := deps.AdminDefaults
+	if adminDefaults == nil {
+		// Embeddings without cmd/silo's shared instance (tests, tools) get
+		// their own, refreshed by this router's admin writes and its TTL.
+		var reader config.ManySettingReader
+		if many, ok := settingsRepo.(config.ManySettingReader); ok {
+			reader = many
+		}
+		adminDefaults = config.NewAdminDefaults(reader)
+	}
 	var accessGroupStore *access.GroupStore
 	if deps.DB != nil {
 		accessGroupStore = access.NewGroupStore(deps.DB)
@@ -629,6 +648,11 @@ func newChiRouter(deps Dependencies) chi.Router {
 		if deps.AuthProviderRecheck != nil {
 			authService.SetProviderRecheck(deps.AuthProviderRecheck)
 		}
+		signInAttempts := deps.SignInAttempts
+		if signInAttempts == nil {
+			signInAttempts = ratelimit.NewMemoryAttemptLimiter(ratelimit.SignInNamePolicy)
+		}
+		authService.SetSignInAttempts(signInAttempts)
 		if settingsRepo != nil {
 			invitationService = invitations.NewService(
 				invitations.NewRepository(deps.DB),
@@ -675,10 +699,10 @@ func newChiRouter(deps Dependencies) chi.Router {
 		authMiddleware = apimw.NewAuthMiddleware(jwtService, sessionRepo, apiKeyRepo, userRepo)
 		if deps.UserStoreProvider != nil {
 			if deps.PolicySystem != nil {
-				viewerResolver = policy.NewViewerResolver(userRepo, deps.UserStoreProvider, profileTokenService, deps.PolicySystem.PDP(), accessGroupStore).WithUnratedContentPolicy(unratedContent)
+				viewerResolver = policy.NewViewerResolver(userRepo, deps.UserStoreProvider, profileTokenService, deps.PolicySystem.PDP(), accessGroupStore).WithUnratedContentPolicy(unratedContent).WithAdminDefaults(adminDefaults)
 			} else {
 				// Legacy resolver: proxy/test wiring without a policy system. Production integrated/api modes always take the policy path. Removed with the legacy cleanup phase.
-				viewerResolver = access.NewResolver(userRepo, deps.UserStoreProvider, profileTokenService, accessGroupStore).WithUnratedContentPolicy(unratedContent)
+				viewerResolver = access.NewResolver(userRepo, deps.UserStoreProvider, profileTokenService, accessGroupStore).WithUnratedContentPolicy(unratedContent).WithAdminDefaults(adminDefaults)
 			}
 			viewerAccessMiddleware = apimw.NewViewerAccessMiddleware(viewerResolver)
 			// Shared personal collections are limited to their owner's
@@ -1132,7 +1156,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 	// collage of their titles; it needs artwork storage and poster signing.
 	var personalCollages *catalog.PersonalCollectionCollages
 	if deps.DB != nil && detailSvc != nil {
-		if gen := handlers.NewPersonalCollectionCollageGenerator(deps.Blobs.Assets, detailSvc, nil); gen != nil {
+		if gen := handlers.NewPersonalCollectionCollageGenerator(deps.Blobs.Assets, detailSvc, deps.ArtworkSigner, nil); gen != nil {
 			personalCollages = deps.PersonalCollectionCollages
 			if personalCollages == nil {
 				personalCollages = catalog.NewPersonalCollectionCollages(deps.DB, nil)
@@ -1163,6 +1187,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 			profileHandler.RecommendationsPurger = recommendations.NewRepo(deps.DB)
 			// Ebook reading data lives there too.
 			profileHandler.EbookReaderPurger = handlers.NewPGEbookReaderProgressStore(deps.DB)
+			profileHandler.Connections = &connectionstore.Store{Pool: deps.DB}
 		}
 		if watchlistRequestWithdrawer != nil {
 			profileHandler.WatchlistRequestWithdrawer = watchlistRequestWithdrawer
@@ -1254,6 +1279,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 			// profile on its own account. Without the token service a
 			// PIN-locked primary cannot widen rather than widening unguarded.
 			settingValuesHandler.ProfileTokens = profileTokenService
+			settingValuesHandler.SetAdminDefaults(adminDefaults)
 			if deps.FolderRepo != nil {
 				settingValuesHandler.SetLibraryLookup(deps.FolderRepo)
 			} else if deps.DB != nil {
@@ -1266,6 +1292,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 		deviceHandler = handlers.NewDeviceHandler(deps.UserStoreProvider)
 		deviceHandler.EventsHub = deps.EventsHub
 		deviceHandler.ProfileTokens = profileTokenService
+		if deps.DB != nil {
+			deviceHandler.Connections = &connectionstore.Store{Pool: deps.DB}
+		}
 		homeDismissalHandler = handlers.NewHomeDismissalHandler(deps.UserStoreProvider)
 		homeDismissalHandler.EventsHub = deps.EventsHub
 		if deps.DB != nil {
@@ -1345,6 +1374,8 @@ func newChiRouter(deps Dependencies) chi.Router {
 		playbackHandler.StreamTelemetry = deps.StreamTelemetry
 		if deps.DB != nil {
 			playbackHandler.PlanStoreV3 = planstore.NewPostgres(deps.DB)
+			playbackHandler.Connections = &connectionstore.Store{Pool: deps.DB}
+			playbackHandler.SourceBitrates = &catalog.SourceBitrates{Pool: deps.DB}
 			// The v2 playback contract binds every mutation to this server's
 			// installation identity; a client that read capabilities from a
 			// different installation is refused. Nothing else depends on it, so a
@@ -1660,8 +1691,13 @@ func newChiRouter(deps Dependencies) chi.Router {
 		if deps.OnUserSessionsRevoked != nil {
 			adminHandler.OnUserSessionsRevoked = deps.OnUserSessionsRevoked
 		}
-		if deps.OnServerSettingUpdated != nil {
-			adminHandler.OnServerSettingUpdated = deps.OnServerSettingUpdated
+		// Refresh the administrator defaults before the handler tells clients
+		// to re-read, so their next request already sees the new default.
+		adminHandler.OnServerSettingUpdated = func(ctx context.Context, key, value string) {
+			adminDefaults.Changed(ctx, key)
+			if deps.OnServerSettingUpdated != nil {
+				deps.OnServerSettingUpdated(ctx, key, value)
+			}
 		}
 		if deps.RecWorker != nil {
 			adminHandler.RecWorker = deps.RecWorker
@@ -2005,6 +2041,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		sectionBulkHandler = &handlers.SectionBulkHandler{Repo: sectionRepo}
 		sectionFetcher := sections.NewFetcher(deps.DB)
 		sectionFetcher.StoreProvider = deps.UserStoreProvider
+		sectionFetcher.AdminDefaults = adminDefaults
 		sectionFetcher.CollectionOwners = collectionOwners
 		if watchlistTitles != nil {
 			sectionFetcher.WatchlistPromoter = watchlistTitles
@@ -2130,6 +2167,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		)
 		libraryCollectionHandler.ArtworkStore = deps.Blobs.Assets
 		libraryCollectionHandler.ArtworkResolver = deps.ArtworkResolver
+		libraryCollectionHandler.ArtworkSigner = deps.ArtworkSigner
 		libraryCollectionHandler.FrontendFS = deps.FrontendFS
 		libraryCollectionHandler.Executor = &catalog.QueryExecutor{Pool: deps.DB}
 		libraryCollectionHandler.SectionRepo = sectionRepo
@@ -2198,10 +2236,12 @@ func newChiRouter(deps Dependencies) chi.Router {
 			recsRepo = recommendations.NewRepo(deps.DB)
 			recsReader = deps.recommendationReader(recsRepo, ratingsRepo)
 		}
-		recsHandler = handlers.NewRecommendationsHandler(deps.Recommender, recsReader, deps.UserStoreProvider, ratingsRepo, recsRepo, deps.Recommender != nil)
+		recsHandler = handlers.NewRecommendationsHandler(deps.Recommender, recsReader, deps.UserStoreProvider, ratingsRepo, recsRepo, deps.Recommender != nil).
+			WithUserStoreOutsidePostgres(deps.Config != nil && deps.Config.UserDB.Backend == "sqlite")
 		if deps.DB != nil {
 			recsFetcher := sections.NewFetcher(deps.DB)
 			recsFetcher.StoreProvider = deps.UserStoreProvider
+			recsFetcher.AdminDefaults = adminDefaults
 			recsFetcher.CollectionOwners = collectionOwners
 			if watchlistTitles != nil {
 				recsFetcher.WatchlistPromoter = watchlistTitles
@@ -2775,10 +2815,13 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.NotificationDestinationTests = inbox
 		v2deps.NotificationDestinationCreate = inbox
 		v2deps.OrderedAndroidPush = inbox
+		v2deps.AndroidPushRetirement = deps.Notifications.PushDevices
 		v2deps.OrderedApplePush = handlers.NewOrderedApplePushV2(deps.Notifications.PushDevices, jwtService, sessionRepo, userRepo, viewerResolver, actingAdmin)
+		v2deps.ApplePushRetirement = deps.Notifications.PushDevices
 		v2deps.AdminNotificationPush = deps.Notifications
 		v2deps.AdminNotificationDiscord = deps.Notifications
 		v2deps.NotificationChannels = deps.Notifications
+		v2deps.NotificationDiscordManagement = newDiscordNotificationsHandler(deps, profileTokenService)
 		v2deps.NotificationEmailVerification = deps.Notifications.EmailVerification
 		v2deps.NotificationEmailLinks = handlers.NewEmailLinkHandler(deps.Notifications)
 		linkHandler := handlers.NewDiscordLinkHandler(deps.Notifications, deps.Notifications.Settings, deps.PublicURL)
@@ -3285,7 +3328,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		// /notifications subrouter below (static routes win in chi).
 		var discordNotificationsHandler *handlers.DiscordNotificationsHandler
 		if deps.Notifications != nil {
-			discordNotificationsHandler = handlers.NewDiscordNotificationsHandler(deps.Notifications, deps.PublicURL)
+			discordNotificationsHandler = newDiscordNotificationsHandler(deps, profileTokenService)
 			if deps.OnConfigChange != nil {
 				h := discordNotificationsHandler
 				deps.OnConfigChange(func(_, updated *config.Config) { h.SetPublicURL(updated.Server.PublicURL) })
@@ -3472,7 +3515,8 @@ func newChiRouter(deps Dependencies) chi.Router {
 					r.With(apimw.RequireProfile).Post("/events/ws-ticket", notificationsHandler.HandleMintWSTicket)
 					r.With(apimw.RequireProfile).Post("/devices/push/apple", notificationsHandler.HandleRegisterApplePushDevice)
 					// Discord DM channel: the linked identity and mode hang off
-					// the login account, not a profile, so these stay outside
+					// the login account. Writes require the household manager
+					// in the handler; the optional profile routes stay outside
 					// the RequireProfile subrouter below (static paths coexist
 					// with it, same as the public email-link routes above).
 					if discordNotificationsHandler != nil {
@@ -5370,6 +5414,14 @@ func newPersonalAPIKeyHandler(
 ) *handlers.APIKeyHandler {
 	h := handlers.NewAPIKeyHandler(repo)
 	h.Stores = stores
+	h.ProfileTokens = tokens
+	return h
+}
+
+// Both API versions use the same household authority dependencies.
+func newDiscordNotificationsHandler(deps Dependencies, tokens *access.ProfileTokenService) *handlers.DiscordNotificationsHandler {
+	h := handlers.NewDiscordNotificationsHandler(deps.Notifications, deps.PublicURL)
+	h.Stores = deps.UserStoreProvider
 	h.ProfileTokens = tokens
 	return h
 }

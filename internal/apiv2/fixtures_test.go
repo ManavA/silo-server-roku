@@ -2138,6 +2138,7 @@ func fixtureDeps() Dependencies {
 	deps.NotificationDiscordLinks = new(fakeNotificationDiscordLinks)
 	deps.NotificationRelay = new(fakeNotificationRelay)
 	deps.NotificationChannels = new(fakeNotificationChannels)
+	deps.NotificationDiscordManagement = discordManagement([]userstore.Profile{{ID: "p-primary", IsPrimary: true}})
 	deps.NotificationDestinations = new(fakeNotificationDestinations)
 	accounts := fixtureAdminAccounts()
 	accounts.allowImpersonation = true
@@ -2231,6 +2232,10 @@ func generateFixtures(t *testing.T) map[string][]byte {
 			}
 		} else {
 			r = httptest.NewRequest(c.method, c.path, nil)
+		}
+		// Absolute discovery URLs in published fixtures use a reserved test host.
+		if r.URL.Path == Prefix+"/playback/capabilities" {
+			r.Host = "api.example.test"
 		}
 		for k, v := range c.headers {
 			r.Header.Set(k, v)

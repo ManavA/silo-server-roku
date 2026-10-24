@@ -88,7 +88,7 @@ func dvFragmentTestSample(nalus ...[]byte) []byte {
 func TestDV7HLSRecipeSurvivesReconstruction(t *testing.T) {
 	opts := TranscodeOpts{SessionID: "dv7-fixture", TargetCodecVideo: "copy", SeparateAudioHLS: true, DV7ToDV81: true}
 	card := NewRecipeCard(1, "profile", 42, "", opts)
-	restored := RecipeCardFromClaims(ptr(card.ToClaims())).TranscodeOpts(t.TempDir(), "ffmpeg", nil)
+	restored := RecipeCardFromClaims(new(card.ToClaims())).TranscodeOpts(t.TempDir(), "ffmpeg", nil)
 	if !restored.DV7ToDV81 {
 		t.Fatal("reconstructed transport lost DV conversion")
 	}

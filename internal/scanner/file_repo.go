@@ -17,6 +17,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/pathscope"
 	"github.com/Silo-Server/silo-server/internal/scanbatch"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -1158,10 +1159,26 @@ func (r *FileRepository) UpdateIdentityAndExternalSubtitles(ctx context.Context,
 }
 
 func (r *FileRepository) updateIdentity(ctx context.Context, mf models.MediaFile, externalSubtitlesJSON []byte) (int, error) {
-	groupKeyVersion, identityConfidence, identityJSON := identityColumnDefaults(mf)
+	query := `UPDATE media_files SET ` + identityAssignments + `,
+		match_suppressed_at = NULL,
+		updated_at = NOW()
+	WHERE file_path = $1
+	RETURNING id`
 
-	query := `UPDATE media_files SET
-		media_folder_id = $2,
+	var id int
+	err := r.pool.QueryRow(ctx, query, identityArgs(mf.FilePath, mf, externalSubtitlesJSON)...).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrFileNotFound
+		}
+		return 0, fmt.Errorf("updating media file identity: %w", err)
+	}
+	return id, nil
+}
+
+// identityAssignments sets the path-derived identity columns, and the
+// sidecar list when one is given, from arguments $2 to $24 of identityArgs.
+const identityAssignments = `media_folder_id = $2,
 		canonical_root_path = $3,
 		observed_root_path = $4,
 		content_group_key = $5,
@@ -1183,15 +1200,14 @@ func (r *FileRepository) updateIdentity(ctx context.Context, mf models.MediaFile
 		presentation_part_total = $21,
 		multi_episode_start = $22,
 		multi_episode_end = $23,
-		external_subtitles = COALESCE($24, external_subtitles),
-		match_suppressed_at = NULL,
-		updated_at = NOW()
-	WHERE file_path = $1
-	RETURNING id`
+		external_subtitles = COALESCE($24, external_subtitles)`
 
-	var id int
-	err := r.pool.QueryRow(ctx, query,
-		mf.FilePath,
+// identityArgs returns the arguments for identityAssignments, with key, the
+// row the caller's WHERE clause selects, as $1.
+func identityArgs(key any, mf models.MediaFile, externalSubtitlesJSON []byte) []any {
+	groupKeyVersion, identityConfidence, identityJSON := identityColumnDefaults(mf)
+	return []any{
+		key,
 		mf.MediaFolderID,
 		mf.CanonicalRootPath,
 		mf.ObservedRootPath,
@@ -1215,14 +1231,66 @@ func (r *FileRepository) updateIdentity(ctx context.Context, mf models.MediaFile
 		nilIfZero(mf.MultiEpisodeStart),
 		nilIfZero(mf.MultiEpisodeEnd),
 		externalSubtitlesJSON,
-	).Scan(&id)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, ErrFileNotFound
-		}
-		return 0, fmt.Errorf("updating media file identity: %w", err)
 	}
-	return id, nil
+}
+
+// MovedFileCandidates returns the rows in a folder that recorded the same size
+// and OSHash as the file that appeared at filePath, the rows it may have moved
+// from, along with any row already at filePath. A scan whose snapshot predates
+// another scan's write finds that row here and leaves it alone.
+func (r *FileRepository) MovedFileCandidates(ctx context.Context, folderID int, filePath string, fileSize int64, fileHash string) ([]*scanStateFile, error) {
+	rows, err := r.pool.Query(ctx, `SELECT `+scanStateColumns+` FROM media_files
+		WHERE media_folder_id = $3
+		  AND (file_path = $4 OR (file_hash = $1 AND file_size = $2 AND extra_id IS NULL))`,
+		fileHash, fileSize, folderID, filePath,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying moved file candidates: %w", err)
+	}
+	return scanScanStateRows(rows)
+}
+
+// RelinkMovedFile moves the row of a file that left moved.FilePath to
+// mf.FilePath, marks it present, and rewrites its path-derived identity and
+// sidecars from mf. Probe data, chapters, markers, and every row keyed to the
+// file's id stay as they are. The update only applies while the row is still
+// the one the caller verified: same path, bytes, modification time, and links.
+// It reports false when the row changed meanwhile or another row holds the new
+// path; the caller then treats the file as new.
+func (r *FileRepository) RelinkMovedFile(ctx context.Context, moved *scanStateFile, mf models.MediaFile) (bool, error) {
+	externalSubtitlesJSON, err := serializeJSONB(mf.ExternalSubtitles)
+	if err != nil {
+		return false, fmt.Errorf("marshaling external_subtitles: %w", err)
+	}
+	args := append(identityArgs(moved.ID, mf, externalSubtitlesJSON),
+		mf.FilePath,
+		moved.FilePath,
+		moved.FileHash,
+		moved.FileSize,
+		moved.FileModifiedAt,
+		nilIfEmpty(moved.ContentID),
+		nilIfEmpty(moved.EpisodeID),
+	)
+	tag, err := r.pool.Exec(ctx, `UPDATE media_files SET `+identityAssignments+`,
+		file_path = $25,
+		missing_since = NULL,
+		updated_at = NOW()
+	WHERE id = $1
+	  AND file_path = $26
+	  AND file_hash = $27
+	  AND file_size = $28
+	  AND file_modified_at IS NOT DISTINCT FROM $29
+	  AND content_id IS NOT DISTINCT FROM $30
+	  AND episode_id IS NOT DISTINCT FROM $31
+	  AND extra_id IS NULL`, args...)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return false, nil
+		}
+		return false, fmt.Errorf("relinking moved media file: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 type ChapterThumbnailFailureState struct {
@@ -1750,29 +1818,13 @@ func (r *FileRepository) upsertAndClearMarkers(ctx context.Context, fileID int, 
 	if update != nil && !update.DetectedAt.IsZero() {
 		mutationAt = update.DetectedAt.UTC()
 	}
-	changed := markerSegmentFlags{}
-
+	var applyUpdate *MarkerUpdate
 	if hasUpdate {
-		applied, err := applyMarkerUpdateToMutationState(update, &state, mutationAt)
-		if err != nil {
-			return false, err
-		}
-		changed.intro = changed.intro || applied.intro
-		changed.credits = changed.credits || applied.credits
-		changed.recap = changed.recap || applied.recap
-		changed.preview = changed.preview || applied.preview
+		applyUpdate = update
 	}
-	if clearFlags.intro {
-		changed.intro = clearManualSegmentState(&state.intro, mutationAt) || changed.intro
-	}
-	if clearFlags.credits {
-		changed.credits = clearManualSegmentState(&state.credits, mutationAt) || changed.credits
-	}
-	if clearFlags.recap {
-		changed.recap = clearManualSegmentState(&state.recap, mutationAt) || changed.recap
-	}
-	if clearFlags.preview {
-		changed.preview = clearManualSegmentState(&state.preview, mutationAt) || changed.preview
+	changed, err := applyMarkerMutation(applyUpdate, clearFlags, &state, mutationAt)
+	if err != nil {
+		return false, err
 	}
 	if !changed.any() {
 		if err := tx.Commit(ctx); err != nil {
@@ -1915,9 +1967,15 @@ func applyMarkerUpdateToMutationState(update *MarkerUpdate, state *markerMutatio
 		{"recap", &state.recap, update.RecapStart, update.RecapEnd, update.RecapProvenance, &applied.recap},
 		{"preview", &state.preview, update.PreviewStart, update.PreviewEnd, update.PreviewProvenance, &applied.preview},
 	} {
+		start, end, kindRanges := patch.start, patch.end, ranges[patch.kind]
+		if patch.kind == models.MarkerSegmentCredits {
+			// The intro has already been patched, so this checks against the
+			// intro the file is left with.
+			start, end, kindRanges = placedCredits(state, start, end, kindRanges)
+		}
 		source, provider, confidence, algorithm := resolveSegmentProvenance(*update, patch.provenance)
 		changed, err := applySegmentRanges(patch.state, state.existingSource, source, provider, confidence, algorithm,
-			patch.start, patch.end, ranges[patch.kind], state.duration, patch.kind, mutationAt)
+			start, end, kindRanges, state.duration, patch.kind, mutationAt)
 		if err != nil {
 			return markerSegmentFlags{}, err
 		}
@@ -1926,13 +1984,67 @@ func applyMarkerUpdateToMutationState(update *MarkerUpdate, state *markerMutatio
 		if existingSource == nil {
 			existingSource = state.existingSource
 		}
-		if patch.start == nil && patch.end == nil && len(ranges[patch.kind]) == 0 && patch.state.provider != nil &&
+		if start == nil && end == nil && len(kindRanges) == 0 && patch.state.provider != nil &&
 			(existingSource == nil || *existingSource != models.MarkerSourceManual) &&
 			slices.Contains(update.RefreshedProviders, *patch.state.provider) {
 			*patch.changed = clearSegmentState(patch.state)
 		}
 	}
 	return applied, nil
+}
+
+// applyMarkerMutation applies the manual clears in clearFlags, then update
+// (nil for a clear-only request), to state, and reports which kinds changed.
+// Clears go first so the credits in update are checked against the intro the
+// request leaves the file with.
+func applyMarkerMutation(update *MarkerUpdate, clearFlags markerSegmentFlags, state *markerMutationState, mutationAt time.Time) (markerSegmentFlags, error) {
+	changed := markerSegmentFlags{}
+	if clearFlags.intro {
+		changed.intro = clearManualSegmentState(&state.intro, mutationAt)
+	}
+	if clearFlags.credits {
+		changed.credits = clearManualSegmentState(&state.credits, mutationAt)
+	}
+	if clearFlags.recap {
+		changed.recap = clearManualSegmentState(&state.recap, mutationAt)
+	}
+	if clearFlags.preview {
+		changed.preview = clearManualSegmentState(&state.preview, mutationAt)
+	}
+	if update != nil {
+		applied, err := applyMarkerUpdateToMutationState(update, state, mutationAt)
+		if err != nil {
+			return markerSegmentFlags{}, err
+		}
+		changed.intro = changed.intro || applied.intro
+		changed.credits = changed.credits || applied.credits
+		changed.recap = changed.recap || applied.recap
+		changed.preview = changed.preview || applied.preview
+	}
+	return changed, nil
+}
+
+// placedCredits drops the credits in an update that fail the placement every
+// marker source shares (markers.CheckCreditsPlacement), from its ranges and
+// from its singular bounds. Dropping them before the write lets a refresh that
+// returns only misplaced credits clear the provider's stored ones like any
+// other withdrawn range.
+func placedCredits(state *markerMutationState, start, end *float64, ranges []models.MarkerSegment) (*float64, *float64, []models.MarkerSegment) {
+	limits := markers.CreditsLimitsForFile(&state.file)
+	kept := limits.KeepPlaced(ranges, state.duration, state.intro.end)
+	if start != nil || end != nil {
+		s, e := state.credits.start, state.credits.end
+		if start != nil {
+			s = start
+		}
+		if end != nil {
+			e = end
+		}
+		if s != nil && e != nil && limits.CheckCreditsPlacement(*s, *e, state.duration, state.intro.end) != nil {
+			start, end = nil, nil
+		}
+	}
+	return start, end, kept
 }
 
 func writeMarkerMutationState(
@@ -3025,11 +3137,14 @@ func claimRepresentativeWindow(limit int) int {
 	return window
 }
 
-// MarkMissing sets the missing_since timestamp for the given media file.
-func (r *FileRepository) MarkMissing(ctx context.Context, id int, since time.Time) error {
+// MarkMissing sets the missing_since timestamp for the given media file while
+// it is still recorded at filePath. A row that moved to another path since the
+// caller read it (a rename relinked it) is left alone and reported as
+// ErrFileNotFound, like a row deleted meanwhile.
+func (r *FileRepository) MarkMissing(ctx context.Context, id int, filePath string, since time.Time) error {
 	tag, err := r.pool.Exec(ctx,
-		"UPDATE media_files SET missing_since = $1, updated_at = NOW() WHERE id = $2",
-		since, id,
+		"UPDATE media_files SET missing_since = $1, updated_at = NOW() WHERE id = $2 AND file_path = $3",
+		since, id, filePath,
 	)
 	if err != nil {
 		return fmt.Errorf("marking file missing: %w", err)
@@ -3059,7 +3174,8 @@ func (r *FileRepository) MarkMissing(ctx context.Context, id int, since time.Tim
 // Returns the number of rows deleted.
 func (r *FileRepository) DeleteMissingByFolder(ctx context.Context, folderID int, gracePeriod time.Duration, protectedRoots []string) (int, error) {
 	cutoff := time.Now().UTC().Add(-gracePeriod)
-	query := `DELETE FROM media_files mf
+	query := `WITH deleted AS (
+		DELETE FROM media_files mf
 		WHERE mf.media_folder_id = $1
 		  AND mf.missing_since IS NOT NULL
 		  AND mf.missing_since < $2
@@ -3073,11 +3189,15 @@ func (r *FileRepository) DeleteMissingByFolder(ctx context.Context, folderID int
 		query += " AND NOT (" + strings.Join(clauses, " OR ") + ")"
 		args = append(args, clauseArgs...)
 	}
-	tag, err := r.pool.Exec(ctx, query, args...)
-	if err != nil {
+	query += `
+		RETURNING mf.id, mf.extra_id
+	)` + catalog.ClearEmptiedExtraStillsCTE + `
+	SELECT count(*) FROM deleted`
+	var deleted int
+	if err := r.pool.QueryRow(ctx, query, args...).Scan(&deleted); err != nil {
 		return 0, fmt.Errorf("deleting missing files for folder %d: %w", folderID, err)
 	}
-	return int(tag.RowsAffected()), nil
+	return deleted, nil
 }
 
 // ListRootsWithCatalogedFiles returns the subset of roots (in input order)
@@ -3181,20 +3301,25 @@ func (r *FileRepository) ListRootsWithOnlyMissingFiles(ctx context.Context, fold
 	return suspect, nil
 }
 
-// DeleteByIDs removes specific media file rows by primary key.
+// DeleteByIDs removes specific media file rows by primary key, clearing the
+// image of any local extra left without a file
+// (catalog.ClearEmptiedExtraStillsCTE).
 func (r *FileRepository) DeleteByIDs(ctx context.Context, ids []int) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
 
-	tag, err := r.pool.Exec(ctx,
-		"DELETE FROM media_files WHERE id = ANY($1)",
+	var deleted int
+	err := r.pool.QueryRow(ctx, `WITH deleted AS (
+		DELETE FROM media_files WHERE id = ANY($1) RETURNING id, extra_id
+	)`+catalog.ClearEmptiedExtraStillsCTE+`
+	SELECT count(*) FROM deleted`,
 		ids,
-	)
+	).Scan(&deleted)
 	if err != nil {
 		return 0, fmt.Errorf("deleting media files by id: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	return deleted, nil
 }
 
 // ListIDsOutsideRoots returns file row ids for a folder whose paths are no
@@ -3784,7 +3909,7 @@ func (r *FileRepository) ClearContentLinksByPathPrefix(ctx context.Context, fold
 		`, folderID, oldEpisodeIDs); err != nil {
 			return 0, fmt.Errorf("deleting stale episode library links by path prefix: %w", err)
 		}
-		if err := catalog.RecomputeSeriesLatestEpisodeAdded(ctx, tx, affectedSeriesIDs); err != nil {
+		if err := catalog.RecomputeSeriesEpisodeMembershipDenorms(ctx, tx, affectedSeriesIDs); err != nil {
 			return 0, err
 		}
 	}
@@ -3869,7 +3994,7 @@ func (r *FileRepository) UpdateEpisodeLink(ctx context.Context, fileID int, epis
 	`, affectedEpisodeIDs).Scan(&affectedSeriesIDs); err != nil {
 		return fmt.Errorf("collecting affected episode series: %w", err)
 	}
-	if err := catalog.RecomputeSeriesLatestEpisodeAdded(ctx, tx, affectedSeriesIDs); err != nil {
+	if err := catalog.RecomputeSeriesEpisodeMembershipDenorms(ctx, tx, affectedSeriesIDs); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -3883,15 +4008,31 @@ func (r *FileRepository) UpdateEpisodeLink(ctx context.Context, fileID int, epis
 // season/episode hints remain unlinked for the slower fallback path.
 func (r *FileRepository) BulkLinkEpisodesBySeries(ctx context.Context, seriesContentID string) (int, error) {
 	var linked int
-	err := r.pool.QueryRow(ctx, `
-		WITH updated AS (
+	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		// Lock the candidates in id order first, the order curated rebind,
+		// rename and split lock a series' files; the UPDATE alone locks them
+		// in plan order and can deadlock with those.
+		var addedLinks bool
+		if err := tx.QueryRow(ctx, `
+		WITH locked AS (
+			SELECT id FROM media_files
+			WHERE content_id = $1
+			  AND episode_id IS NULL
+			  AND missing_since IS NULL
+			  AND season_number IS NOT NULL
+			  AND episode_number IS NOT NULL
+			ORDER BY id
+			FOR UPDATE
+		),
+		updated AS (
 			UPDATE media_files mf
 			SET episode_id = e.content_id,
 				season_number = e.season_number,
 				episode_number = e.episode_number,
 				updated_at = NOW()
 			FROM episodes e
-			WHERE mf.content_id = $1
+			WHERE mf.id IN (SELECT id FROM locked)
+			  AND mf.content_id = $1
 			  AND mf.episode_id IS NULL
 			  AND mf.missing_since IS NULL
 			  AND mf.season_number IS NOT NULL
@@ -3912,21 +4053,22 @@ func (r *FileRepository) BulkLinkEpisodesBySeries(ctx context.Context, seriesCon
 			FROM updated
 			GROUP BY episode_id, media_folder_id
 			ON CONFLICT (episode_id, media_folder_id) DO NOTHING
-			RETURNING first_seen_at
-		),
-		-- Bump the series' latest-episode-added denorm for genuinely new
-		-- links only ("Latest Episodes" sort, issue #202). All inserted
-		-- rows belong to $1, so no per-series grouping is needed.
-		bumped AS (
-			UPDATE media_items mi
-			SET latest_episode_added_at = GREATEST(COALESCE(mi.latest_episode_added_at, sub.latest_added), sub.latest_added)
-			FROM (SELECT MAX(first_seen_at) AS latest_added FROM inserted) sub
-			WHERE mi.content_id = $1
-			  AND mi.type = 'series'
-			  AND sub.latest_added IS NOT NULL
+			RETURNING episode_id
 		)
-		SELECT COUNT(*) FROM updated
-	`, seriesContentID).Scan(&linked)
+		SELECT (SELECT COUNT(*) FROM updated), EXISTS (SELECT 1 FROM inserted)
+	`, seriesContentID).Scan(&linked, &addedLinks); err != nil {
+			return err
+		}
+		if !addedLinks {
+			return nil
+		}
+		// Genuinely new links move the series' membership denorms ("Latest
+		// Episodes", issue #202; "Latest Episode Air Date", issue #2741).
+		// Recompute them in a later statement: one that waited on a
+		// concurrent air-date correction's series lock would still apply
+		// this statement's older episode dates.
+		return catalog.RecomputeSeriesEpisodeMembershipDenorms(ctx, tx, []string{seriesContentID})
+	})
 	if err != nil {
 		return 0, fmt.Errorf("bulk-linking series files to episodes: %w", err)
 	}

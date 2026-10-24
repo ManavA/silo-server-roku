@@ -30,10 +30,19 @@ compatibility does not expose these administrator settings contracts.
 check against the submitted `values` and `dirty_keys`, merged with stored settings.
 Supported kinds are `s3_public`, `s3_operational`, `s3_private`, `redis`,
 `recommendations_embedding`, `ai_chat`, `ai_transcription`, `meilisearch`, and
-`mdblist`. Stored AI and embedding credentials are sent only to the base URL
-they were saved for (same scheme, host and port): a draft that points
-`ai_chat`, `ai_transcription` or `recommendations_embedding` elsewhere is
-checked with the credential it submits in `values` and `dirty_keys`, or none.
+`mdblist`. Stored AI, embedding and Meilisearch credentials are sent only to the
+authority they were saved for (same scheme, host and effective port; hosts are
+compared as the HTTP client dials them, after IDNA conversion, and explicit HTTP
+port 80 and HTTPS port 443 equal their implicit defaults). A draft
+that points `ai_chat`, `ai_transcription`, `recommendations_embedding` or
+`meilisearch` elsewhere is checked with the credential it submits in `values`
+and `dirty_keys`, or none.
+Same-authority path changes retain saved credentials. Explicit empty credentials
+remain clears under each provider's existing fallback rules. Connection checks do
+not persist draft values. Credentialed Meilisearch checks follow redirects only
+within the same scheme, exact host and effective port; any other redirect fails the check with a
+message asking for the final address. Checks without a key retain the HTTP
+client's ordinary redirect behavior.
 Provider failures return `success: false` with a generic message that excludes
 provider error bodies and credentials. Invalid kinds/configuration return `422`.
 
@@ -254,6 +263,19 @@ after 10 seconds, even for a URL that turns the socket timeouts off.
 - The connection is made before the settings transaction. If another write
   changes the stored Redis settings in the meantime, the write is refused the
   same way and can be sent again.
+
+### Lower-version transcoding
+
+`playback.prefer_lower_version_transcode` is a boolean setting, default
+`true`. It applies when `allow_4k_transcode` is `true` and a 4K title has a
+lower-resolution version. A quality at or below that version's resolution
+class, such as Auto under a bandwidth estimate, is transcoded from the lower
+version. Qualities above it, such as **4K Medium**, still transcode the 4K
+version. When `false`, every lower quality transcodes the 4K version. With
+`allow_4k_transcode` set to `false`, the lower version serves lower qualities
+whatever this setting says. Changes apply to new playback decisions. The
+Playback settings page shows this policy as **Prefer 1080p
+versions** while 4K transcoding is allowed.
 
 ### HEVC encoding
 

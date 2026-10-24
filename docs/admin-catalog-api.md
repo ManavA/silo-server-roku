@@ -258,7 +258,8 @@ it. Clearing a rating also deletes the item's stored score for that source
 show in its place. Clearing an episode's air date recomputes the series air
 dates. `null` on any other field preserves its value. Explicit empty strings,
 zeroes, and empty arrays remain edits. An air timezone must be empty or a valid
-IANA timezone. Frozen v1 treats `null` like omission and clears nothing. The
+IANA timezone. `status` is the item's match status and must be `pending`,
+`matched`, or `unmatched`; any other value fails with `422`. Frozen v1 treats `null` like omission and clears nothing. The
 service tries item, season, then episode ownership and returns
 canonical catalog detail after the update and existing invalidation events.
 A follow-up detail-read failure can occur after persistence; it does not roll
@@ -427,9 +428,12 @@ Jellyfin have no corresponding administration callers.
 ordered by fetch priority then provider ID. Plugin installation IDs are opaque
 strings. `PUT /api/v2/admin/markers/providers/{provider}` retains partial-update
 semantics: omitted/null members preserve current values; explicit false and zero
-remain edits. Confidence must be between 0 and 1. Persistence and the existing
-configuration event run synchronously; there is no revision precondition or
-whole-operation replay receipt.
+remain edits. Confidence must be between 0 and 1. `fetch_min_confidence`,
+default 0, leaves the provider's markers rated below it out of lookups; see
+[markers-api.md](markers-api.md#provider-modes-and-storage). It is v2-only: the
+frozen v1 provider routes neither return nor accept it. Persistence and the
+existing configuration event run synchronously; there is no revision
+precondition or whole-operation replay receipt.
 
 `POST /api/v2/admin/markers/providers/{provider}/validate` asks the provider for
 contribution statistics. It returns `200` with `valid: true` and typed statistics,
@@ -488,6 +492,18 @@ disables mutation retries and authentication replay, including dry runs. All
 three operations require acting-administrator access. No native or Jellyfin
 administration caller was found; frozen v1 adapters retain their original wire
 shapes and behavior.
+
+Explicit split/merge and match/apply re-check each existing source and destination
+against the current transaction's complete library memberships before identity or
+state movement. Delegated metadata curators must cover every library of each item;
+an existing item with no memberships is refused. A newly inserted split target
+inherits only the authorized selected-file libraries. Concurrent target creation
+is treated as an existing target. V2 split/merge retain acting-administrator access;
+the frozen v1 bridge retains delegated curation under the same library policy.
+A policy refusal returns 403: the v1 bridge uses its legacy `forbidden` error
+envelope, and v2 match/apply a `permission_denied` problem. Each refused
+transaction rolls back; the multi-step match pipeline has no whole-request atomicity
+guarantee. Detached split identification retains the originating curation authority.
 
 ### Match repair
 
