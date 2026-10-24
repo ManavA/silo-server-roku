@@ -425,6 +425,13 @@ func (m *TranscodeManager) RestartSegmentLocked(
 	return target, ok, err
 }
 
+// RecoverAudioSegmentLocked rechecks a missing audio file under its owner's lifecycle lock.
+func (m *TranscodeManager) RecoverAudioSegmentLocked(ctx context.Context, sessionID string, ts *TranscodeSession, name string) error {
+	return m.restartSessionLocked(sessionID, ts, func() error {
+		return ts.RecoverAudioSegment(ctx, name)
+	})
+}
+
 func (m *TranscodeManager) restartSessionLocked(sessionID string, ts *TranscodeSession, restart func() error) error {
 	unlock := m.LockSessionLifecycle(sessionID)
 	defer unlock()

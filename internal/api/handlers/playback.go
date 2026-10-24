@@ -2012,7 +2012,15 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 		transcodeSession.ServeSubtitleSegment(w, r, subtitleSegment)
 		return
 	}
-	segmentLease, err := transcodeSession.OpenSegment(segmentName)
+	segmentLease, err := transcodeSession.OpenMediaSegment(segmentName)
+	if errors.Is(err, playback.ErrSegmentNotFound) {
+		if _, audioErr := playback.ParseAudioSegmentNumber(segmentName); audioErr == nil {
+			err = h.tm.RecoverAudioSegmentLocked(r.Context(), sessionID, transcodeSession, segmentName)
+			if err == nil {
+				segmentLease, err = transcodeSession.OpenMediaSegment(segmentName)
+			}
+		}
+	}
 	if err != nil && errors.Is(err, playback.ErrSegmentNotFound) {
 		segNum, parseErr := playback.ParseSegmentNumber(segmentName)
 		if parseErr == nil {
@@ -2152,9 +2160,7 @@ func (h *PlaybackHandler) HandleGetTranscodeSegment(w http.ResponseWriter, r *ht
 	http.ServeContent(sw, r, segmentLease.Info.Name(), segmentLease.Info.ModTime(), segmentLease.File)
 	if r.Method == http.MethodGet &&
 		sw.CompletedFullResponse(segmentLease.Info.Size()) {
-		if segNum, parseErr := playback.ParseSegmentNumber(segmentName); parseErr == nil {
-			transcodeSession.ReportSegmentDownloadedForGeneration(segNum, segmentLease.Generation)
-		}
+		transcodeSession.ReportMediaSegmentDownloadedForGeneration(segmentName, segmentLease.Generation)
 	}
 }
 
@@ -2198,7 +2204,8 @@ func (h *PlaybackHandler) relayToTranscodeNode(w http.ResponseWriter, r *http.Re
 	targetURL := transcodeNodeURL + path
 	isSegmentRoute := strings.Contains(path, "/segment/")
 	_, segmentParseErr := playback.ParseSegmentNumber(filepath.Base(path))
-	isMediaSegment := segmentParseErr == nil
+	_, audioParseErr := playback.ParseAudioSegmentNumber(filepath.Base(path))
+	isMediaSegment := segmentParseErr == nil || audioParseErr == nil
 	// Capture the signed stream token ("st") before stripping it from the URL.
 	// We forward it out-of-band as a header so the node can reconstruct after a
 	// self-restart, while keeping it out of the forwarded/logged URL.

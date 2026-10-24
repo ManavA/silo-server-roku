@@ -24,6 +24,46 @@ type segmentPruneCandidate struct {
 	path   string
 }
 
+type segmentPruneState struct {
+	floor       int
+	highWater   int
+	running     bool
+	beforeStart bool
+}
+
+type segmentPruneFields struct {
+	floor       *int
+	running     *bool
+	beforeStart *bool
+}
+
+func (s *TranscodeSession) pruneFields(audio bool) segmentPruneFields {
+	if audio {
+		return segmentPruneFields{&s.audioPrune.floor, &s.audioPrune.running, &s.audioPrune.beforeStart}
+	}
+	return segmentPruneFields{&s.lastPruneFloor, &s.segmentPruneRunning, &s.pruneBeforeStart}
+}
+
+func pruneSegmentFilename(number int, opts TranscodeOpts, audio bool) string {
+	if audio {
+		return fmt.Sprintf("audio_%05d.ts", number)
+	}
+	return segmentFilename(number, opts)
+}
+
+func (s *TranscodeSession) scheduleAudioPruneLocked() {
+	if !s.audioCompleted || s.opts.SegmentRetentionSeconds <= 0 || s.audioPrune.running || s.restarting != nil {
+		return
+	}
+	if s.audioCompletedSegment-s.audioPrune.highWater < segmentPruneHysteresis {
+		return
+	}
+	// Renditions share a frozen origin, but their ordinals and ACK high-water marks differ.
+	s.audioPrune.running = true
+	s.audioPrune.highWater = s.audioCompletedSegment
+	go s.pruneDownloadedMediaSegments(s.segmentGeneration, s.audioCompletedSegment, false, true)
+}
+
 // copyManifestDurationIndex retains the duration entries already observed for
 // one FFmpeg generation. Copy-mode manifests can grow to 50,000 entries, so a
 // prune pass must not reread and walk the complete playlist every five segment
@@ -80,6 +120,11 @@ func (s *TranscodeSession) scheduleSegmentPruneLocked() {
 // of the client. The current process's startup window remains present so real
 // manifest reloads cannot get stuck behind startupFilesReady after cleanup.
 func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloadedThrough int, continuation bool) {
+	s.pruneDownloadedMediaSegments(generation, downloadedThrough, continuation, false)
+}
+
+func (s *TranscodeSession) pruneDownloadedMediaSegments(generation uint64, downloadedThrough int, continuation, audio bool) {
+	fields := s.pruneFields(audio)
 	started := time.Now()
 	s.mu.Lock()
 	if generation != s.segmentGeneration || s.restarting != nil {
@@ -89,25 +134,26 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 		// yet fail without replacing the process — must release the flag here
 		// or pruning stays disabled for the rest of the generation.
 		if generation == s.segmentGeneration {
-			s.segmentPruneRunning = false
+			*fields.running = false
 		}
 		s.mu.Unlock()
 		return
 	}
 	opts := s.opts
 	outputDir := s.outputDir
-	fromFloor := s.lastPruneFloor
-	pruneBeforeStart := s.pruneBeforeStart
+	fromFloor := *fields.floor
+	pruneBeforeStart := *fields.beforeStart
+	generationStartedAt := s.generationStartedAt
 	s.mu.Unlock()
 
-	floor, complete, err := s.segmentRetentionFloor(generation, opts, downloadedThrough)
+	floor, complete, err := s.mediaSegmentRetentionFloor(generation, opts, downloadedThrough, audio)
 	if err != nil {
 		slog.Warn("resolve transcode segment retention floor", "component", "playback", "error", err, "session", opts.SessionID, "playback_session_id", opts.SessionID)
-		s.finishSegmentPrune(generation, fromFloor, fromFloor, downloadedThrough, segmentPruneRetryDelay)
+		s.finishMediaSegmentPrune(audio, generation, fromFloor, fromFloor, downloadedThrough, segmentPruneRetryDelay)
 		return
 	}
 	if !complete || (!pruneBeforeStart && floor <= opts.StartSegmentNumber) || floor <= fromFloor || (!continuation && floor-fromFloor < segmentPruneHysteresis) {
-		s.finishSegmentPruneAttempt(generation)
+		s.finishMediaSegmentPruneAttempt(audio, generation)
 		return
 	}
 
@@ -129,13 +175,13 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 		targetFloor = min(floor, opts.StartSegmentNumber)
 	}
 	if !pruneBeforeStart && fromSegment >= targetFloor {
-		s.finishSegmentPrune(generation, targetFloor, targetFloor, downloadedThrough, 0)
+		s.finishMediaSegmentPrune(audio, generation, targetFloor, targetFloor, downloadedThrough, 0)
 		return
 	}
 
 	if _, err := os.Stat(outputDir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			s.finishSegmentPrune(generation, targetFloor, targetFloor, downloadedThrough, 0)
+			s.finishMediaSegmentPrune(audio, generation, targetFloor, targetFloor, downloadedThrough, 0)
 			return
 		}
 		slog.Warn("stat transcode directory for pruning", "component", "playback", "error", err, "session", opts.SessionID, "playback_session_id", opts.SessionID)
@@ -143,7 +189,7 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 		if pruneBeforeStart {
 			retryFloor = fromFloor
 		}
-		s.finishSegmentPrune(generation, retryFloor, targetFloor, downloadedThrough, segmentPruneRetryDelay)
+		s.finishMediaSegmentPrune(audio, generation, retryFloor, targetFloor, downloadedThrough, segmentPruneRetryDelay)
 		return
 	}
 
@@ -153,12 +199,12 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 		entries, readErr := os.ReadDir(outputDir)
 		if readErr != nil {
 			slog.Warn("read transcode directory for preserved segment pruning", "component", "playback", "error", readErr, "session", opts.SessionID, "playback_session_id", opts.SessionID)
-			s.finishSegmentPrune(generation, fromFloor, targetFloor, downloadedThrough, segmentPruneRetryDelay)
+			s.finishMediaSegmentPrune(audio, generation, fromFloor, targetFloor, downloadedThrough, segmentPruneRetryDelay)
 			return
 		}
 		for _, entry := range entries {
 			segment, parseErr := ParseSegmentNumber(entry.Name())
-			if entry.IsDir() || parseErr != nil || segment >= targetFloor || entry.Name() != segmentFilename(segment, opts) {
+			if entry.IsDir() || parseErr != nil || segment >= targetFloor || entry.Name() != pruneSegmentFilename(segment, opts, audio) {
 				continue
 			}
 			if len(candidates) == segmentPruneBatchSize {
@@ -175,13 +221,13 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 		for segment := fromSegment; segment < toSegment; segment++ {
 			candidates = append(candidates, segmentPruneCandidate{
 				number: segment,
-				path:   filepath.Join(outputDir, segmentFilename(segment, opts)),
+				path:   filepath.Join(outputDir, pruneSegmentFilename(segment, opts, audio)),
 			})
 		}
 		moreCandidates = toSegment < targetFloor
 	}
 	if len(candidates) == 0 && !moreCandidates {
-		s.finishSegmentPrune(generation, targetFloor, targetFloor, downloadedThrough, 0)
+		s.finishMediaSegmentPrune(audio, generation, targetFloor, targetFloor, downloadedThrough, 0)
 		return
 	}
 
@@ -194,6 +240,13 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 	var freedBytes int64
 	for _, candidate := range candidates {
 		info, err := os.Stat(candidate.path)
+		if errors.Is(err, os.ErrNotExist) && !audio && opts.DV7ToDV81 {
+			rawPath := filepath.Join(outputDir, dv7SourceDirectory, filepath.Base(candidate.path))
+			info, err = os.Stat(rawPath)
+			if err == nil {
+				candidate.path = rawPath
+			}
+		}
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -204,6 +257,9 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 				processedFloor, retryAfter = earlierPruneRetry(processedFloor, retryAfter, candidate.number, segmentPruneRetryDelay)
 			}
 			slog.Warn("stat downloaded transcode segment", "component", "playback", "error", err, "segment", candidate.number, "session", opts.SessionID, "playback_session_id", opts.SessionID)
+			continue
+		}
+		if audio && !generationStartedAt.IsZero() && info.ModTime().Before(generationStartedAt) {
 			continue
 		}
 		freshUntil := info.ModTime().Add(freshGuard)
@@ -222,12 +278,24 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 		s.mu.Lock()
 		if generation != s.segmentGeneration || s.restarting != nil {
 			if generation == s.segmentGeneration {
-				s.segmentPruneRunning = false
+				*fields.running = false
 			}
 			s.mu.Unlock()
 			return
 		}
 		removeErr := os.Remove(candidate.path)
+		rawFreed := int64(0)
+		if removeErr == nil && !audio && opts.DV7ToDV81 && filepath.Dir(candidate.path) == outputDir {
+			rawPath := filepath.Join(outputDir, dv7SourceDirectory, filepath.Base(candidate.path))
+			rawInfo, statErr := os.Stat(rawPath)
+			rawErr := os.Remove(rawPath)
+			if rawErr == nil && statErr == nil {
+				rawFreed = rawInfo.Size()
+			}
+			if rawErr != nil && !errors.Is(rawErr, os.ErrNotExist) {
+				removeErr = rawErr
+			}
+		}
 		s.mu.Unlock()
 		if removeErr != nil {
 			if !errors.Is(removeErr, os.ErrNotExist) {
@@ -241,13 +309,13 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 			continue
 		}
 		removed++
-		freedBytes += info.Size()
+		freedBytes += info.Size() + rawFreed
 	}
 	if pruneBeforeStart && (moreCandidates || retryAfter > 0) {
 		processedFloor = fromFloor
 	}
 
-	s.finishSegmentPrune(generation, processedFloor, targetFloor, downloadedThrough, retryAfter)
+	s.finishMediaSegmentPrune(audio, generation, processedFloor, targetFloor, downloadedThrough, retryAfter)
 	if removed > 0 {
 		slog.Info("pruned downloaded transcode segments",
 			"component", "playback",
@@ -267,12 +335,16 @@ func (s *TranscodeSession) pruneDownloadedSegments(generation uint64, downloaded
 // derived from the current manifest's actual EXTINF durations. complete is
 // false when the manifest does not yet cover the full requested back buffer.
 func (s *TranscodeSession) segmentRetentionFloor(generation uint64, opts TranscodeOpts, downloadedThrough int) (floor int, complete bool, err error) {
+	return s.mediaSegmentRetentionFloor(generation, opts, downloadedThrough, false)
+}
+
+func (s *TranscodeSession) mediaSegmentRetentionFloor(generation uint64, opts TranscodeOpts, downloadedThrough int, audio bool) (floor int, complete bool, err error) {
 	retentionSeconds := opts.SegmentRetentionSeconds
 	if retentionSeconds <= 0 {
 		return 0, false, nil
 	}
 
-	if !strings.EqualFold(opts.TargetCodecVideo, "copy") {
+	if !audio && !strings.EqualFold(opts.TargetCodecVideo, "copy") {
 		segmentDuration := opts.SegmentDuration
 		if segmentDuration <= 0 {
 			segmentDuration = defaultSegmentDuration
@@ -285,12 +357,41 @@ func (s *TranscodeSession) segmentRetentionFloor(generation uint64, opts Transco
 	defer s.copyDurationMu.Unlock()
 
 	index := &s.copyDurationIndex
+	if audio {
+		index = &s.audioDurationIndex
+	}
 	if index.generation != generation {
 		index.reset(generation)
 	}
+	// Cached entries already passed this generation's origin and freshness checks.
+	if audio && index.loaded && index.firstSegment == opts.StartSegmentNumber && downloadedThrough <= index.lastSegment {
+		return index.retentionFloor(downloadedThrough, retentionSeconds)
+	}
 	manifestPath := filepath.Join(s.outputDir, "stream.m3u8")
+	if audio {
+		manifestPath = filepath.Join(s.outputDir, hlsAudioManifestFilename)
+		s.mu.Lock()
+		started := s.generationStartedAt
+		s.mu.Unlock()
+		if !index.loaded {
+			// Reuse the throttle/recovery snapshot when it already observed this manifest.
+			timeline, info, snapshotErr := s.audioTimelineSnapshot(s.outputDir)
+			if snapshotErr != nil {
+				return 0, false, snapshotErr
+			}
+			if timeline.mediaSequence != opts.StartSegmentNumber || (!started.IsZero() && info.ModTime().Before(started)) {
+				return 0, false, nil
+			}
+			if err := index.replace(timeline.entries); err != nil {
+				return 0, false, err
+			}
+		}
+	}
 	if err := index.loadThrough(manifestPath, downloadedThrough); err != nil {
 		return 0, false, err
+	}
+	if audio && index.firstSegment != opts.StartSegmentNumber {
+		return 0, false, nil
 	}
 	return index.retentionFloor(downloadedThrough, retentionSeconds)
 }
@@ -444,53 +545,64 @@ func earlierPruneRetry(currentFloor int, currentDelay time.Duration, segment int
 	return currentFloor, currentDelay
 }
 
-func (s *TranscodeSession) finishSegmentPruneAttempt(generation uint64) {
+func (s *TranscodeSession) finishMediaSegmentPruneAttempt(audio bool, generation uint64) {
+	fields := s.pruneFields(audio)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if generation != s.segmentGeneration {
 		return
 	}
-	s.segmentPruneRunning = false
-	s.scheduleSegmentPruneLocked()
+	*fields.running = false
+	if audio {
+		s.scheduleAudioPruneLocked()
+	} else {
+		s.scheduleSegmentPruneLocked()
+	}
 }
 
-func (s *TranscodeSession) finishSegmentPrune(
+func (s *TranscodeSession) finishMediaSegmentPrune(
+	audio bool,
 	generation uint64,
 	processedFloor int,
 	targetFloor int,
 	downloadedThrough int,
 	retryAfter time.Duration,
 ) {
+	fields := s.pruneFields(audio)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if generation != s.segmentGeneration {
 		return
 	}
-	if processedFloor > s.lastPruneFloor {
-		s.lastPruneFloor = processedFloor
+	if processedFloor > *fields.floor {
+		*fields.floor = processedFloor
 	}
-	if s.pruneBeforeStart && s.lastPruneFloor >= s.opts.StartSegmentNumber {
-		s.pruneBeforeStart = false
+	if *fields.beforeStart && *fields.floor >= s.opts.StartSegmentNumber {
+		*fields.beforeStart = false
 	}
 	if retryAfter > 0 {
 		time.AfterFunc(retryAfter, func() {
 			s.mu.Lock()
 			if generation != s.segmentGeneration || s.restarting != nil {
 				if generation == s.segmentGeneration {
-					s.segmentPruneRunning = false
+					*fields.running = false
 				}
 				s.mu.Unlock()
 				return
 			}
 			s.mu.Unlock()
-			go s.pruneDownloadedSegments(generation, downloadedThrough, true)
+			go s.pruneDownloadedMediaSegments(generation, downloadedThrough, true, audio)
 		})
 		return
 	}
 	if processedFloor < targetFloor {
-		go s.pruneDownloadedSegments(generation, downloadedThrough, true)
+		go s.pruneDownloadedMediaSegments(generation, downloadedThrough, true, audio)
 		return
 	}
-	s.segmentPruneRunning = false
-	s.scheduleSegmentPruneLocked()
+	*fields.running = false
+	if audio {
+		s.scheduleAudioPruneLocked()
+	} else {
+		s.scheduleSegmentPruneLocked()
+	}
 }
