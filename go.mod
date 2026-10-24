@@ -55,6 +55,7 @@ require (
 
 require (
 	cloud.google.com/go v0.123.0 // indirect
+	github.com/Eyevinn/mp4ff v0.60.0 // indirect
 	github.com/PuerkitoBio/goquery v1.8.0 // indirect
 	github.com/TwiN/go-color v1.4.1 // indirect
 	github.com/agnivade/levenshtein v1.2.1 // indirect

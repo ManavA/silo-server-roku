@@ -52,7 +52,12 @@ type TranscodeOpts struct {
 	VideoSampleEntry     string // allowlisted copy-HLS sample entry: dvh1 or hvc1
 	// CopyVideoMPEGTS packages copied video in MPEG-TS instead of fMP4. It is
 	// durable because the segment extension and bytes must survive restarts.
-	CopyVideoMPEGTS bool
+	CopyVideoMPEGTS              bool
+	separateAudioTimestampOffset float64
+	DV7ToDV81                    bool   `json:"dv7_to_dv81,omitempty"`
+	SeparateAudioHLS             bool   `json:"separate_audio_hls,omitempty"`
+	HLSCodecs                    string `json:"hls_codecs,omitempty"`
+	HLSVideoRange                string `json:"hls_video_range,omitempty"`
 	// KeyframePlaylist serves a copy-video stream that starts at the
 	// beginning as one complete VOD playlist planned from the source's
 	// keyframe index, instead of FFmpeg's growing playlist (#1466). It is
@@ -258,6 +263,19 @@ type TranscodeSession struct {
 	stderrLineIndex      int
 	stderrWriter         *ffmpegStderrWriter
 	restartHook          func(context.Context)
+
+	audioSegmentDemands   map[*audioSegmentDemand]struct{}
+	audioCompletedSegment int
+	audioCompleted        bool
+	audioPrune            segmentPruneState
+	audioDurationIndex    copyManifestDurationIndex
+	audioManifestInfo     os.FileInfo
+	audioTimeline         manifestTimeline
+	dvMu                  sync.Mutex
+	dvContext             context.Context //nolint:containedctx // current FFmpeg generation context, canceled with its process
+	dvToolPath            string
+	dvInheritedManifest   os.FileInfo
+
 	// generationStartedAt is when the currently-owning ffmpeg process was
 	// spawned. Output in the shared directory older than this timestamp was
 	// written by a previous generation (or a previous session sharing the
@@ -311,6 +329,8 @@ func (s *TranscodeSession) SetRestartHook(fn func(context.Context)) {
 
 // SegmentProgress describes the media ffmpeg has actually produced on disk.
 type SegmentProgress struct {
+	timeline        manifestTimeline
+	Generation      uint64
 	ProducedHead    int
 	LastProducedAt  time.Time
 	ManifestModTime time.Time
@@ -392,6 +412,13 @@ const (
 
 // StartTranscode launches an ffmpeg process that produces HLS segments.
 func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession, error) {
+	dvToolPath, dvErr := prepareDV7HLS(ctx, opts)
+	if dvErr != nil {
+		return nil, dvErr
+	}
+	if err := validateSeparateAudioHLS(opts); err != nil {
+		return nil, err
+	}
 	if !validVideoSampleEntry(opts.VideoSampleEntry) ||
 		opts.VideoSampleEntry != "" && !strings.EqualFold(opts.TargetCodecVideo, "copy") &&
 			(opts.VideoSampleEntry != VideoSampleEntryHVC1 || !strings.EqualFold(opts.TargetCodecVideo, transcodeCodecHEVC)) {
@@ -406,6 +433,11 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	}
 	if opts.SegmentDuration <= 0 {
 		opts.SegmentDuration = defaultSegmentDuration
+	}
+	var separateAudioErr error
+	opts, separateAudioErr = prepareSeparateAudioTimestampOffset(ctx, opts)
+	if separateAudioErr != nil {
+		return nil, separateAudioErr
 	}
 	opts = normalizeTranscodeOptsContext(ctx, opts)
 	if err := validateToneMapOpts(opts); err != nil {
@@ -442,6 +474,12 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 		releaseHWDevice()
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
+	if opts.DV7ToDV81 {
+		if err := os.MkdirAll(filepath.Join(opts.OutputDir, dv7SourceDirectory), 0750); err != nil {
+			releaseHWDevice()
+			return nil, err
+		}
+	}
 	if err := prepareSubtitleFilterInput(&opts); err != nil {
 		releaseHWDevice()
 		return nil, err
@@ -470,6 +508,7 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 		opts.subtitleCueFile = subtitleCueFileName(subtitleCueBase)
 	}
 	s := &TranscodeSession{
+		dvContext: ctx, dvToolPath: dvToolPath, dvInheritedManifest: statManifest(filepath.Join(opts.OutputDir, dv7SourceDirectory)),
 		cancel:               cancel,
 		opts:                 opts,
 		outputDir:            opts.OutputDir,
@@ -906,6 +945,9 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 
 	// Audio codec.
 	args = appendAudioArgs(args, opts)
+	if opts.SeparateAudioHLS && opts.separateAudioTimestampOffset > 0 {
+		args = append(args, "-output_ts_offset", strconv.FormatFloat(opts.separateAudioTimestampOffset, 'f', 6, 64))
+	}
 
 	// Subtitle burn-in and resolution scaling — only when encoding video.
 	if !isVideoCopy {
@@ -920,15 +962,19 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	// HLS, so package it in MPEG-TS while still copying the video stream.
 	// Actual transcoding uses MPEG-TS segments to avoid the hls.js endOfStream()
 	// race with fMP4 (hls.js #6337).
+	videoDirectory := opts.OutputDir
+	if opts.DV7ToDV81 {
+		videoDirectory = filepath.Join(videoDirectory, dv7SourceDirectory)
+	}
 	var segmentPattern string
 	segmentType := HLSOutputContainer(opts)
 	videoUsesFMP4 := videoUsesFMP4(opts)
 	if videoUsesFMP4 {
-		segmentPattern = filepath.Join(opts.OutputDir, "seg_%05d.m4s")
+		segmentPattern = filepath.Join(videoDirectory, "seg_%05d.m4s")
 	} else {
-		segmentPattern = filepath.Join(opts.OutputDir, "seg_%05d.ts")
+		segmentPattern = filepath.Join(videoDirectory, "seg_%05d.ts")
 	}
-	manifestPath := filepath.Join(opts.OutputDir, "stream.m3u8")
+	manifestPath := filepath.Join(videoDirectory, "stream.m3u8")
 
 	args = append(args,
 		"-max_muxing_queue_size", "2048",
@@ -956,7 +1002,13 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	if opts.StartSegmentNumber > 0 {
 		args = append(args, "-start_number", fmt.Sprintf("%d", opts.StartSegmentNumber))
 	}
+	if opts.SeparateAudioHLS {
+		args = append(args, "-an")
+	}
 	args = append(args, manifestPath)
+	if opts.SeparateAudioHLS {
+		args = appendSeparateAudioHLSArgs(args, opts)
+	}
 	args = appendSubtitleRenditionOutputArgs(args, opts)
 
 	return args
@@ -1036,6 +1088,9 @@ func appendStreamSelectionArgs(args []string, opts TranscodeOpts) []string {
 		args = append(args, "-map", "[vout]")
 	} else {
 		args = append(args, "-map", "0:v:0")
+	}
+	if opts.SeparateAudioHLS {
+		return append(args, "-sn", "-dn")
 	}
 	if audioTrackIndex >= 0 {
 		args = append(args, "-map", fmt.Sprintf("0:a:%d?", audioTrackIndex))
@@ -2130,6 +2185,9 @@ func (s *TranscodeSession) GetManifest() ([]byte, error) {
 // output. The check compares file identity rather than timestamps, so a
 // filesystem whose clock differs from this host's cannot hide fresh output.
 func (s *TranscodeSession) getManifest(currentGeneration bool) ([]byte, error) {
+	if err := s.prepareDV7Manifest(currentGeneration); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2156,6 +2214,13 @@ func (s *TranscodeSession) getManifest(currentGeneration bool) ([]byte, error) {
 			return nil, ErrManifestNotReady
 		}
 		return nil, fmt.Errorf("read manifest: %w", err)
+	}
+
+	if s.opts.SeparateAudioHLS {
+		audio, _, audioErr := readManifestFile(filepath.Join(s.outputDir, "audio.m3u8"))
+		if audioErr != nil || !startupFilesReady(audio, s.outputDir, 1) {
+			return nil, ErrManifestNotReady
+		}
 	}
 
 	requiredSegments := startupSegmentRequirement(s.opts)
@@ -2278,6 +2343,9 @@ func (s *TranscodeSession) waitForManifest(ctx context.Context, timeout time.Dur
 // longer media uses FFmpeg's real sliding playlist.
 func (s *TranscodeSession) BuildPlaybackManifest(segPrefix, rawQuery string) ([]byte, error) {
 	opts := s.Opts()
+	if opts.SeparateAudioHLS {
+		return s.buildSeparateAudioManifest(segPrefix, rawQuery)
+	}
 	if s.copyPlan != nil {
 		return s.copyPlan.manifest(opts, segPrefix, rawQuery), nil
 	}
@@ -2738,6 +2806,8 @@ func parseManifestTimeline(manifest []byte) (manifestTimeline, error) {
 		segmentNumber := currentNumber
 		if parsed, err := ParseSegmentNumber(filepath.Base(string(trimmed))); err == nil {
 			segmentNumber = parsed
+		} else if parsed, err := ParseAudioSegmentNumber(filepath.Base(string(trimmed))); err == nil {
+			segmentNumber = parsed
 		}
 
 		timeline.entries = append(timeline.entries, manifestSegmentEntry{
@@ -2793,6 +2863,7 @@ func (s *TranscodeSession) SegmentProgress(time.Time) SegmentProgress {
 	s.mu.Lock()
 	opts := s.opts
 	progress := SegmentProgress{
+		Generation:           s.segmentGeneration,
 		ProducedHead:         opts.StartSegmentNumber - 1,
 		Running:              s.running,
 		Restarting:           s.restarting != nil,
@@ -2807,7 +2878,11 @@ func (s *TranscodeSession) SegmentProgress(time.Time) SegmentProgress {
 		progress.SegmentDuration = defaultSegmentDuration
 	}
 
-	manifestPath := filepath.Join(s.outputDir, "stream.m3u8")
+	producerDir := s.outputDir
+	if opts.DV7ToDV81 {
+		producerDir = filepath.Join(producerDir, dv7SourceDirectory)
+	}
+	manifestPath := filepath.Join(producerDir, "stream.m3u8")
 	manifestInfo, statErr := os.Stat(manifestPath)
 	if statErr != nil {
 		return progress
@@ -2824,6 +2899,8 @@ func (s *TranscodeSession) SegmentProgress(time.Time) SegmentProgress {
 		return progress
 	}
 
+	progress.timeline = timeline
+
 	// FFmpeg numbers segments in order, renames each finished segment into
 	// place (-hls_flags temp_file) before rewriting the playlist to list it,
 	// and lists only its own segments because append_list is not set. The last
@@ -2832,7 +2909,7 @@ func (s *TranscodeSession) SegmentProgress(time.Time) SegmentProgress {
 	// entry of a playlist that can list 50,000 segments.
 	for i := len(timeline.entries) - 1; i >= 0; i-- {
 		number := timeline.entries[i].number
-		info, err := os.Stat(filepath.Join(s.outputDir, segmentFilename(number, opts)))
+		info, err := os.Stat(filepath.Join(producerDir, segmentFilename(number, opts)))
 		if err != nil || info.Size() <= 0 {
 			continue
 		}
@@ -2991,6 +3068,9 @@ func syntheticManifestQuery(segmentCount int, rawQuery string) (definition, suff
 
 // GetSegment returns the file path of a named segment if it exists.
 func (s *TranscodeSession) GetSegment(name string) (string, error) {
+	if err := s.ensureDV7Segment(name); err != nil {
+		return "", err
+	}
 	// Sanitize the name to prevent directory traversal.
 	clean := filepath.Base(name)
 	segPath := filepath.Join(s.outputDir, clean)
@@ -3029,6 +3109,9 @@ func (l *SegmentLease) Close() error {
 // OpenSegment opens a completed segment for serving and captures its FFmpeg
 // generation atomically with the open.
 func (s *TranscodeSession) OpenSegment(name string) (*SegmentLease, error) {
+	if err := s.ensureDV7Segment(name); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.restarting != nil {
@@ -3104,6 +3187,9 @@ func (s *TranscodeSession) shutdown(removeOutput bool) error {
 
 	s.running = false
 	s.segmentGeneration++
+	s.audioCompleted = false
+	s.audioCompletedSegment = 0
+	s.audioPrune = segmentPruneState{floor: s.opts.StartSegmentNumber, highWater: s.opts.StartSegmentNumber - 1}
 	s.segmentPruneRunning = false
 
 	// Clean up temporary directory.
@@ -3337,6 +3423,35 @@ func (s *TranscodeSession) restart(
 		close(flight.done)
 		return flight.err
 	}
+	dvToolPath, dvErr := prepareDV7HLS(validationCtx, opts)
+	if dvErr != nil {
+		cancelValidation()
+		flight.err = dvErr
+		s.mu.Lock()
+		s.restarting = nil
+		s.mu.Unlock()
+		close(flight.done)
+		return flight.err
+	}
+	probeOpts := opts
+	probeOpts.SeekSeconds = seekSeconds
+	if opts.SeparateAudioHLS {
+		probeOpts.SeekSeconds = opts.SeekSeconds
+	}
+	if s.copyPlan != nil {
+		probeOpts.SeekSeconds = 0
+	}
+	prepared, probeErr := prepareSeparateAudioTimestampOffset(validationCtx, probeOpts)
+	if probeErr != nil {
+		cancelValidation()
+		flight.err = probeErr
+		s.mu.Lock()
+		s.restarting = nil
+		s.mu.Unlock()
+		close(flight.done)
+		return flight.err
+	}
+	opts.separateAudioTimestampOffset = prepared.separateAudioTimestampOffset
 	cancelValidation()
 	s.StopThrottler()
 
@@ -3353,6 +3468,12 @@ func (s *TranscodeSession) restart(
 	// them from the beginning, so it always restarts there. The requested
 	// segment stays the throttler's target, so FFmpeg runs on to reach it.
 	requestedSegment := startSegment
+	if opts.SeparateAudioHLS {
+		// Replay the frozen origin: audio and video have independent segment
+		// boundaries, so a video anchor must never change an existing audio URI.
+		seekSeconds, startSegment = opts.SeekSeconds, opts.StartSegmentNumber
+		streamOriginSeconds, copySeekAnchorResolved = opts.StreamOriginSeconds, opts.CopySeekAnchorResolved
+	}
 	if s.copyPlan != nil {
 		seekSeconds, startSegment, streamOriginSeconds, copySeekAnchorResolved = 0, 0, 0, true
 	}
@@ -3365,6 +3486,15 @@ func (s *TranscodeSession) restart(
 	}
 	s.restartCount++
 	s.segmentGeneration++
+	// Active filename requests follow origin replay only while their selected audio is unchanged.
+	for demand := range s.audioSegmentDemands {
+		if opts.SeparateAudioHLS && demand.generation == s.segmentGeneration-1 && demand.audioTrack == opts.AudioTrackIndex && demand.channels == opts.SourceAudioChannels {
+			demand.generation = s.segmentGeneration
+		}
+	}
+	s.audioCompleted = false
+	s.audioCompletedSegment = 0
+	s.audioPrune = segmentPruneState{floor: s.opts.StartSegmentNumber, highWater: s.opts.StartSegmentNumber - 1}
 	s.segmentPruneRunning = false
 	preStartRangePrunable := opts.SegmentRetentionSeconds > 0 && s.lastPruneFloor < startSegment
 	s.lastRequestedSegment = startSegment
@@ -3409,6 +3539,9 @@ func (s *TranscodeSession) restart(
 			startSegment, previousOpts.TargetCodecVideo, opts.TargetCodecVideo)
 	}
 
+	if opts.DV7ToDV81 {
+		s.cleanDV7SourceForRestart(startSegment)
+	}
 	args := buildFFmpegArgs(opts)
 	bin := opts.FFmpegPath
 	if bin == "" {
@@ -3447,6 +3580,7 @@ func (s *TranscodeSession) restart(
 
 	// As in StartTranscode, stamp the generation before the process can write.
 	inheritedManifest := statManifest(opts.OutputDir)
+	dvInheritedManifest := statManifest(filepath.Join(opts.OutputDir, dv7SourceDirectory))
 	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
 		processmetrics.Record(processmetrics.Transcode, nil, err, ctx.Err())
@@ -3468,6 +3602,9 @@ func (s *TranscodeSession) restart(
 	}
 	s.cmd = cmd
 	s.cancel = cancel
+	s.dvContext = ctx //nolint:fatcontext // replaces the generation context with the new caller context
+	s.dvToolPath = dvToolPath
+	s.dvInheritedManifest = dvInheritedManifest
 	s.opts = opts
 	s.running = true
 	s.restarting = nil
@@ -3674,8 +3811,8 @@ func AppendManifestQueryParam(manifest []byte, key, value string) []byte {
 		if len(trimmed) == 0 {
 			continue
 		}
-		// A multivariant playlist's subtitle rendition carries its playlist
-		// URI as an attribute, exactly like an init segment.
+		// Rendition playlists carry their URI in an EXT-X-MEDIA attribute,
+		// just as init segments carry theirs in EXT-X-MAP.
 		if bytes.HasPrefix(trimmed, []byte("#EXT-X-MAP:")) || bytes.HasPrefix(trimmed, []byte("#EXT-X-MEDIA:")) {
 			lines[i] = appendMapURIQueryParam(trimmed, param)
 			continue
