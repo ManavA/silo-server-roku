@@ -1434,6 +1434,20 @@ no device id because the v2 listener reads no device header. `listWatchlist`,
 outside the library that have since arrived onto this list; see
 [Watchlist titles](#watchlist-titles).
 
+A `404` for an ordinary "not on the list" answer is indistinguishable from probing to reverse-proxy
+security monitoring: a detail screen that checks an item and its episodes produces a burst of
+distinct 404 paths, and CrowdSec's `http-probing` scenario bans the client's address (issue #952).
+`getFavoriteMembership` (`GET /api/v2/favorites/{item_id}/membership`) and
+`getWatchlistMembership` (`GET /api/v2/watchlist/{item_id}/membership`) therefore answer the same
+check as `200` `PersonalListMembership` `{item_id, is_member, added_at?}` for every item the viewer
+may see; `added_at` is present only for a member. They keep `404` for an item that is missing or
+that the viewer may not see, run through the same `GetFavorite`/`GetWatchlistEntry` seams (so the
+watchlist read still promotes arrived titles), and are the reads clients should use.
+`getFavorite` and `getWatchlistEntry` keep their entry-or-`404` contract for already shipped
+clients, as do the v1 `204`/`404` checks. Clients detect the membership reads through
+`getPersonalListCapability` (`GET /api/v2/capabilities/personal-lists`), whose
+`membership_supported` is true when they answer.
+
 The `profiles` section (Phase 4) ports the rest of the household surface around the pilot's
 `updateProfile`: `listProfiles`, `createProfile`, `deleteProfile`, `listHouseholdSessions`,
 `verifyProfilePIN`, `uploadProfileAvatar`, `deleteProfileAvatar`, and the home-row overrides
@@ -1626,7 +1640,8 @@ played}` echo. All four mutations declare `non_retryable` and are not `If-Match`
 Atomic marking suppresses concurrent duplicate history and provider events, but a delayed
 retry after an intervening unmark can create another watch; a durable client watch identity
 is still needed. History removal and unmark choose a fresh cutoff, so a delayed retry can
-hide an intervening watch. Sync accepts an omitted `updated_at`, so a delayed replay can
+hide an intervening watch (unmark keeps the watch in history but stops it counting as
+watched). Sync accepts an omitted `updated_at`, so a delayed replay can
 overwrite newer progress; every item needs a stable event time before automatic retries are safe.
 Two v2-only operations extend the section without ledger rows: `clearResumePosition`
 (`DELETE /api/v2/progress/{media_item_id}/position`, tag `progress`) clears a movie or episode's
@@ -1704,6 +1719,28 @@ with `Retry-After`; `queryCatalogItems` rejects unknown body members and answers
 over 100 rather than clamping; the episode, season, version, and manga-file lists are `{items}`
 envelopes, `getSeriesSeason` answers the season itself, and `getCatalogItem` leaves `keywords`,
 `original_language`, and `status` empty because the detail service does not load them.
+
+`resolveCatalogIdentities` (`POST /api/v2/catalog/resolve`) accepts up to 48 typed
+movie or series seeds with TMDB, IMDb, and TVDB IDs. Clients check
+`getCatalogSearchCapabilities.identity_resolution` and `max_identity_batch` first.
+A positive requires one equal current ID and no contradiction in any shared known
+namespace; a missing namespace does not contradict a known match. Item columns take
+precedence over active provider rows. Rejected historical aliases do not establish
+positives. Results map zero-based seed indexes to authorized native `CatalogItem`
+cards, preserving separate native copies of a title. Metadata IDs are never native IDs.
+
+The default and maximum page budget is 100 examined, authorized candidates. Each
+indexed provider branch applies the shared library and maturity policy before its
+keyset limit. Conflicts consume this budget, so an empty page may still have a
+`next_cursor`; clients follow continuation until `complete` is true. Completion
+means the indexed candidates are exhausted, not that an unmatched title is absent.
+Candidate coverage matches the existing external-ID lookup: exact current columns
+and active provider rows. A historical TMDB column containing a slug cannot be found
+from its numeric ID alone unless an active provider row supplies that numeric ID.
+These unmatched seeds remain unresolved; clients must not label them not owned. Cursors bind the seeds, budget, artwork, account, profile, and effective
+access policy. Pages observe live catalog values, as ordinary catalog keysets do;
+a refresh starts a new batch. Unavailable or failed resolution supplies no absence
+information.
 
 **Section catalog-items (Phase 4), stage B.** Nine more profile-scoped operations under the
 `catalog` tag complete the section: `listSeasonEpisodes`, the capability documents
