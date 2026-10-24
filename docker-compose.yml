@@ -54,7 +54,7 @@ services:
       - ${SILO_DATA_ROOT:-/opt/silo}/meilisearch:/meili_data
 
   silo:
-    image: ${SILO_IMAGE:-ghcr.io/silo-server/silo-server:latest}
+    image: ${SILO_IMAGE:-ghcr.io/manava/silo-server-roku:v0.1.0-roku.2}
     restart: unless-stopped
     # On stop Silo fails readiness, keeps serving for SILO_SHUTDOWN_DELAY
     # (default 5s), then finishes in-flight requests. Docker kills a container
@@ -117,7 +117,7 @@ services:
   # Optional distributed-mode example. Most single-host installs should
   # just use the integrated service above.
   # silo-proxy:
-  #   image: ${SILO_IMAGE:-ghcr.io/silo-server/silo-server:latest}
+  #   image: ${SILO_IMAGE:-ghcr.io/manava/silo-server-roku:v0.1.0-roku.2}
   #   restart: unless-stopped
   #   profiles: [proxy]
   #   # Lets the proxy finish in-flight requests on stop instead of being
@@ -157,7 +157,7 @@ services:
   # Optional distributed-mode example. Most single-host installs should
   # just use the integrated service above.
   # silo-transcode:
-  #   image: ${SILO_IMAGE:-ghcr.io/silo-server/silo-server:latest}
+  #   image: ${SILO_IMAGE:-ghcr.io/manava/silo-server-roku:v0.1.0-roku.2}
   #   restart: unless-stopped
   #   profiles: [transcode]
   #   # On stop the node drains: it takes no new work and lets its sessions

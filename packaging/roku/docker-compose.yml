@@ -1,0 +1,62 @@
+name: silo-roku
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    shm_size: 512mb
+    environment:
+      POSTGRES_USER: silo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: silo
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U silo]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  silo:
+    image: ${SILO_IMAGE:-ghcr.io/manava/silo-server-roku:v0.1.0-roku.7}
+    restart: unless-stopped
+    stop_grace_period: 2m
+    environment:
+      MODE: integrated
+      PORT: '8080'
+      JF_PORT: '8096'
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      DATABASE_URL: postgres://silo:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/silo?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      SILO_PLUGIN_CACHE_DIR: /var/lib/silo/plugins
+      POSTGRES_TUNE: 'off'
+    ports:
+      - '${PORT:-8090}:8080'
+      - '${JF_PORT:-8096}:8096'
+      - '${ABS_PORT:-13378}:13378'
+    volumes:
+      - ${MEDIA_ROOT:?Set MEDIA_ROOT in .env}:/mnt/media:ro
+      - plugins:/var/lib/silo/plugins
+      - artwork:/var/lib/silo/artwork
+      - compat:/var/lib/silo/compat
+      - transcode:/tmp/silo-transcode
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+volumes:
+  postgres:
+  redis:
+  plugins:
+  artwork:
+  compat:
+  transcode:
