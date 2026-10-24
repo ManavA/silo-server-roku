@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"strings"
+
+	"github.com/go-chi/chi/v5"
 )
 
 type requestContextKey string
@@ -85,6 +87,11 @@ var compatPathSegments = map[string]string{
 
 func normalizeCompatPathMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// StripSlashes sets RoutePath, which chi matches instead of URL.Path.
+		// Normalize both so lowercase paths with trailing slashes still route.
+		if rctx := chi.RouteContext(r.Context()); rctx != nil && rctx.RoutePath != "" {
+			rctx.RoutePath = canonicalizeCompatPath(rctx.RoutePath)
+		}
 		normalized := canonicalizeCompatPath(r.URL.Path)
 		if normalized == r.URL.Path {
 			next.ServeHTTP(w, r)
@@ -147,6 +154,11 @@ func canonicalizeCompatPath(path string) string {
 		// opaque value that happens to read "localtrailers" keeps its case.
 		if i >= 3 && strings.EqualFold(part, "localtrailers") && strings.EqualFold(parts[i-2], "items") {
 			parts[i] = "LocalTrailers"
+			continue
+		}
+		// AdditionalParts likewise, only as /Videos/{id}/AdditionalParts.
+		if i >= 3 && strings.EqualFold(part, "additionalparts") && strings.EqualFold(parts[i-2], "videos") {
+			parts[i] = "AdditionalParts"
 			continue
 		}
 		parts[i] = canonicalizeCompatSegment(part)
