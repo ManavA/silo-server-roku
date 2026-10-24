@@ -133,6 +133,10 @@ type Claims struct {
 	VideoBitstreamFilter       string  `json:"vbsf,omitempty"`
 	VideoSampleEntry           string  `json:"vse,omitempty"`
 	CopyVideoMPEGTS            bool    `json:"cvts,omitempty"`
+	SeparateAudioHLS           bool    `json:"sah,omitempty"`
+	DV7ToDV81                  bool    `json:"dv81,omitempty"`
+	HLSCodecs                  string  `json:"hlc,omitempty"`
+	HLSVideoRange              string  `json:"hlr,omitempty"`
 	KeyframePlaylist           bool    `json:"kfp,omitempty"`
 	OutputSubdir               string  `json:"osd,omitempty"`
 	SeekSeconds                float64 `json:"seek,omitempty"`

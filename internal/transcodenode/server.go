@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,6 +67,10 @@ type TranscodeStartRequest struct {
 	VideoBitstreamFilter       string                 `json:"video_bitstream_filter,omitempty"`
 	VideoSampleEntry           string                 `json:"video_sample_entry,omitempty"`
 	CopyVideoMPEGTS            bool                   `json:"copy_video_mpegts,omitempty"`
+	SeparateAudioHLS           bool                   `json:"separate_audio_hls,omitempty"`
+	DV7ToDV81                  bool                   `json:"dv7_to_dv81,omitempty"`
+	HLSCodecs                  string                 `json:"hls_codecs,omitempty"`
+	HLSVideoRange              string                 `json:"hls_video_range,omitempty"`
 	KeyframePlaylist           bool                   `json:"keyframe_playlist,omitempty"`
 	SeekSeconds                float64                `json:"seek_seconds"`
 	StreamOriginSeconds        float64                `json:"stream_origin_seconds,omitempty"`
@@ -172,7 +177,7 @@ func validateCopyFMP4RecipeRequest(req TranscodeStartRequest) error {
 	if !isCopy && req.CopyFMP4RecipeVersion == "" {
 		return nil
 	}
-	if !isCopy || req.CopyFMP4RecipeVersion != playback.CopyFMP4RecipeVersion {
+	if !isCopy || req.CopyFMP4RecipeVersion != playback.CopyHLSRecipeVersion(req.SeparateAudioHLS, req.DV7ToDV81) {
 		return fmt.Errorf("%w: target_codec=%q recipe_version=%q",
 			ErrCopyFMP4RecipeAttestationMismatch, req.TargetCodecVideo, req.CopyFMP4RecipeVersion)
 	}
@@ -541,15 +546,9 @@ func (s *Server) lockSessionLifecycleRead(sessionID string) func() {
 // session; a concurrent teardown or reconstruct that replaced it yields
 // ErrSessionSuperseded rather than re-spawning the stale handle.
 func (s *Server) restartSessionLocked(ctx context.Context, sessionID string, session *playback.TranscodeSession, seekSeconds float64, startSegment int) error {
-	unlock := s.lockSessionLifecycle(sessionID)
-	defer unlock()
-	s.mu.RLock()
-	live, ok := s.sessions[sessionID]
-	s.mu.RUnlock()
-	if !ok || live != session {
-		return playback.ErrSessionSuperseded
-	}
-	return session.Restart(ctx, seekSeconds, startSegment)
+	return s.withLiveSessionLocked(sessionID, session, func() error {
+		return session.Restart(ctx, seekSeconds, startSegment)
+	})
 }
 
 // restartSegmentLocked resolves and applies missing-segment recovery while the
@@ -560,15 +559,32 @@ func (s *Server) restartSegmentLocked(
 	session *playback.TranscodeSession,
 	segNum int,
 ) (playback.SegmentRecoveryTarget, bool, error) {
+	var target playback.SegmentRecoveryTarget
+	var ok bool
+	err := s.withLiveSessionLocked(sessionID, session, func() error {
+		var restartErr error
+		target, ok, restartErr = session.RestartSegment(ctx, segNum)
+		return restartErr
+	})
+	return target, ok, err
+}
+
+func (s *Server) recoverAudioSegmentLocked(ctx context.Context, sessionID string, session *playback.TranscodeSession, name string) error {
+	return s.withLiveSessionLocked(sessionID, session, func() error {
+		return session.RecoverAudioSegment(ctx, name)
+	})
+}
+
+func (s *Server) withLiveSessionLocked(sessionID string, session *playback.TranscodeSession, action func() error) error {
 	unlock := s.lockSessionLifecycle(sessionID)
 	defer unlock()
 	s.mu.RLock()
 	live, ok := s.sessions[sessionID]
 	s.mu.RUnlock()
 	if !ok || live != session {
-		return playback.SegmentRecoveryTarget{}, false, playback.ErrSessionSuperseded
+		return playback.ErrSessionSuperseded
 	}
-	return session.RestartSegment(ctx, segNum)
+	return action()
 }
 
 // NewServer creates a new transcode server.
@@ -1461,7 +1477,9 @@ func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HW
 	ffmpegPath := ""
 	configuredHWAccel := playback.HWAccelNone
 	hwDevice := ""
+	transcodeEnabled := false
 	if cfg := s.watcher.Config(); cfg != nil {
+		transcodeEnabled = cfg.Playback.TranscodeEnabled
 		ffmpegPath = cfg.Playback.FFmpegPath
 		configuredHWAccel = cfg.Playback.HWAccel
 		hwDevice = cfg.Playback.HWDevice
@@ -1485,11 +1503,16 @@ func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HW
 		return playback.HWAccelInfo{}, err
 	}
 	info.ToneMapCapabilities = capabilities
-	registry, err := playback.ProbeTransformationRegistryWithToneMapV3Result(resolveCtx, ffmpegPath, info.ToneMapCapabilities)
+	registry, err := playback.ProbeTransformationRegistryWithPlaybackPolicyV3Result(resolveCtx, ffmpegPath, info.ToneMapCapabilities, transcodeEnabled)
 	if err != nil {
 		return playback.HWAccelInfo{}, err
 	}
 	info.Transformations = registry.Advertised()
+	if !transcodeEnabled {
+		info.Transformations = slices.DeleteFunc(info.Transformations, func(t playback.TransformationV3) bool {
+			return t.Name == playback.TransformationServerDV7DV81V3
+		})
+	}
 	// Progressive remux tokens bind execution to the stable stream_nodes row.
 	// Do not let central commit work to this node until the watcher can resolve
 	// that identity; otherwise every committed GET would fail closed at serve
@@ -1701,6 +1724,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node not configured", http.StatusServiceUnavailable)
 		return
 	}
+	if req.DV7ToDV81 && !cfg.Playback.TranscodeEnabled {
+		http.Error(w, "transcoding is disabled", http.StatusServiceUnavailable)
+		return
+	}
 	// Held from here until the handler returns, by which point activeJobs
 	// covers the session. Without the overlap a re-probe could start in the gap
 	// between admitting this transcode and it becoming visible as an active
@@ -1734,6 +1761,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		VideoBitstreamFilter:       req.VideoBitstreamFilter,
 		VideoSampleEntry:           req.VideoSampleEntry,
 		CopyVideoMPEGTS:            req.CopyVideoMPEGTS,
+		SeparateAudioHLS:           req.SeparateAudioHLS,
+		DV7ToDV81:                  req.DV7ToDV81,
+		HLSCodecs:                  req.HLSCodecs,
+		HLSVideoRange:              req.HLSVideoRange,
 		KeyframePlaylist:           req.KeyframePlaylist,
 		SeekSeconds:                req.SeekSeconds,
 		StreamOriginSeconds:        req.StreamOriginSeconds,
@@ -1765,6 +1796,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		FFmpegLogSink:      s.ffmpegSink,
 	}
 
+	opts.TranscodePolicy = &playback.TranscodePolicy{Enabled: func() bool {
+		current := s.watcher.Config()
+		return current != nil && current.Playback.TranscodeEnabled
+	}}
 	if opts.HWAccel == "" && cfg.Playback.HWAccel != "" {
 		opts.HWAccel = cfg.Playback.HWAccel
 	}
@@ -2078,6 +2113,9 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	if cfg == nil {
 		return nil, nil
 	}
+	if card.DV7ToDV81 && !cfg.Playback.TranscodeEnabled {
+		return nil, errors.New("transcoding is disabled")
+	}
 	// A reconstruct spawns ffmpeg on the GPU exactly as a fresh start does, so
 	// it takes the same exclusion against a running capability re-probe. Held
 	// until this call returns, by which point activeJobs covers the session.
@@ -2089,6 +2127,10 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	defer s.gpu.endWork()
 	outputDir := s.sessionOutputDir(sessionID)
 	opts := card.TranscodeOpts(outputDir, cfg.Playback.FFmpegPath, s.ffmpegSink)
+	opts.TranscodePolicy = &playback.TranscodePolicy{Enabled: func() bool {
+		current := s.watcher.Config()
+		return current != nil && current.Playback.TranscodeEnabled
+	}}
 	opts.SessionID = sessionID
 	opts.Reconstructed = true
 	// Recipe cards preserve the original launch tuning, but reconstruction must
@@ -2874,7 +2916,15 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 		session.ServeSubtitleSegment(w, r, subtitleSegment)
 		return
 	}
-	segmentLease, err := session.OpenSegment(name)
+	segmentLease, err := session.OpenMediaSegment(name)
+	if errors.Is(err, playback.ErrSegmentNotFound) {
+		if _, audioErr := playback.ParseAudioSegmentNumber(name); audioErr == nil {
+			err = s.recoverAudioSegmentLocked(r.Context(), sessionID, session, name)
+			if err == nil {
+				segmentLease, err = session.OpenMediaSegment(name)
+			}
+		}
+	}
 	if errors.Is(err, playback.ErrSegmentNotFound) { //nolint:nestif // pre-existing depth; splitting the segment recovery path is a separate change
 		segNum, parseErr := playback.ParseSegmentNumber(name)
 		if parseErr == nil {
@@ -2988,9 +3038,7 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(sw, r, segmentLease.Info.Name(), segmentLease.Info.ModTime(), segmentLease.File)
 	if !proxied && r.Method == http.MethodGet &&
 		sw.CompletedFullResponse(segmentLease.Info.Size()) {
-		if segmentNumber, parseErr := playback.ParseSegmentNumber(name); parseErr == nil {
-			session.ReportSegmentDownloadedForGeneration(segmentNumber, segmentLease.Generation)
-		}
+		session.ReportMediaSegmentDownloadedForGeneration(name, segmentLease.Generation)
 	}
 }
 
@@ -3001,8 +3049,9 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSegmentDownloaded(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "session_id")
 	name := chi.URLParam(r, "name")
-	segmentNumber, err := playback.ParseSegmentNumber(name)
-	if err != nil {
+	_, videoErr := playback.ParseSegmentNumber(name)
+	_, audioErr := playback.ParseAudioSegmentNumber(name)
+	if videoErr != nil && audioErr != nil {
 		http.Error(w, "invalid segment", http.StatusBadRequest)
 		return
 	}
@@ -3017,7 +3066,7 @@ func (s *Server) handleSegmentDownloaded(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
-	session.ReportSegmentDownloadedForGenerationToken(segmentNumber, generationToken)
+	session.ReportMediaSegmentDownloadedForGenerationToken(name, generationToken)
 	w.WriteHeader(http.StatusNoContent)
 }
 
