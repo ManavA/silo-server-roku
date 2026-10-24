@@ -132,6 +132,7 @@ type RecipeCard struct {
 	SubtitleCodec              string                 `json:"subtitle_codec,omitempty"`
 	SubtitleRendition          bool                   `json:"subtitle_rendition,omitempty"`
 	AudioTrackIndex            int                    `json:"audio_track_index"`
+	RequireAudioTrack          bool                   `json:"require_audio_track,omitempty"`
 	TargetBitrateKbps          int                    `json:"target_bitrate_kbps,omitempty"`
 	TotalDuration              float64                `json:"total_duration"`
 	FastStart                  bool                   `json:"fast_start,omitempty"`
@@ -265,6 +266,7 @@ func NewRecipeCard(userID int, profileID string, mediaFileID int, transcodeNodeU
 		SubtitleCodec:              opts.SubtitleCodec,
 		SubtitleRendition:          opts.SubtitleRendition,
 		AudioTrackIndex:            opts.AudioTrackIndex,
+		RequireAudioTrack:          opts.RequireAudioTrack,
 		TargetBitrateKbps:          opts.TargetBitrateKbps,
 		TotalDuration:              opts.TotalDuration,
 		FastStart:                  opts.FastStart,
@@ -370,6 +372,7 @@ func (c RecipeCard) TranscodeOpts(outputDir, ffmpegPath string, logSink FFmpegLo
 		SubtitleCodec:              c.SubtitleCodec,
 		SubtitleRendition:          c.SubtitleRendition,
 		AudioTrackIndex:            c.AudioTrackIndex,
+		RequireAudioTrack:          c.RequireAudioTrack,
 		TargetBitrateKbps:          c.TargetBitrateKbps,
 		TotalDuration:              c.TotalDuration,
 		FastStart:                  c.FastStart,
@@ -436,6 +439,7 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		TargetCodec:                   c.TargetCodecVideo,
 		TargetRes:                     c.TargetResolution,
 		AudioTrackIndex:               c.AudioTrackIndex,
+		RequireAudioTrack:             c.RequireAudioTrack,
 		UserID:                        c.UserID,
 		ProfileID:                     c.ProfileID,
 		MediaFileID:                   c.MediaFileID,
@@ -570,6 +574,7 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		SubtitleCodec:                 c.SubtitleCodec,
 		SubtitleRendition:             c.SubtitleRendition,
 		AudioTrackIndex:               c.AudioTrackIndex,
+		RequireAudioTrack:             c.RequireAudioTrack,
 		TargetBitrateKbps:             c.TargetBitrateKbps,
 		TotalDuration:                 c.TotalDuration,
 		FastStart:                     c.FastStart,

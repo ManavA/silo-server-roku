@@ -228478,6 +228478,9 @@
           "keyframe_playlist": {
             "type": "boolean"
           },
+          "require_audio_track": {
+            "type": "boolean"
+          },
           "require_ready": {
             "type": "boolean"
           },
