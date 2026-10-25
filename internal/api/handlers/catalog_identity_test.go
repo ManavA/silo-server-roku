@@ -42,3 +42,37 @@ func TestResolveIdentitiesRejectsCardRematchedDuringHydration(t *testing.T) {
 	}
 
 }
+
+type sharedIdentityItems struct{ t *testing.T }
+
+func (sharedIdentityItems) ResolveIdentities(context.Context, catalog.IdentityRequest, catalog.AccessFilter) (catalog.IdentityResult, error) {
+	return catalog.IdentityResult{Matches: []catalog.IdentityMatch{{Seed: 0, ContentID: "shared"}, {Seed: 1, ContentID: "shared"}}}, nil
+}
+func (f sharedIdentityItems) GetByIDsWithAccess(_ context.Context, ids []string, _ catalog.AccessFilter) ([]*models.MediaItem, error) {
+	if len(ids) != 1 || ids[0] != "shared" {
+		f.t.Errorf("item hydration IDs = %v, want [shared]", ids)
+	}
+	return []*models.MediaItem{{ContentID: "shared", Type: "movie", TmdbID: "101", Title: "Synthetic card"}}, nil
+}
+func (f sharedIdentityItems) GetIdentityProviderIDs(_ context.Context, ids []string) (map[string][]*models.MediaItemProviderID, error) {
+	if len(ids) != 1 || ids[0] != "shared" {
+		f.t.Errorf("provider hydration IDs = %v, want [shared]", ids)
+	}
+	return nil, nil
+}
+func TestResolveIdentitiesHydratesSharedItemOnce(t *testing.T) {
+	h := &CatalogHandler{itemsH: &ItemsHandler{}, identityItems: sharedIdentityItems{t: t}}
+	seed := catalog.IdentitySeed{Type: "movie", TmdbID: "101"}
+	view, err := h.ResolveIdentities(t.Context(), ItemViewer{}, catalog.IdentityRequest{Seeds: []catalog.IdentitySeed{seed, seed}, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Matches) != 2 {
+		t.Fatalf("matches = %+v, want both seeds", view.Matches)
+	}
+	for i, match := range view.Matches {
+		if match.Seed != i || match.Item.ContentID != "shared" {
+			t.Errorf("match %d = %+v, want seed %d with shared item", i, match, i)
+		}
+	}
+}

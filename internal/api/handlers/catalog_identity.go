@@ -40,8 +40,12 @@ func (h *CatalogHandler) ResolveIdentities(ctx context.Context, v ItemViewer, re
 		return out, err
 	}
 	ids := make([]string, 0, len(result.Matches))
+	seen := make(map[string]bool, len(result.Matches))
 	for _, m := range result.Matches {
-		ids = append(ids, m.ContentID)
+		if !seen[m.ContentID] {
+			ids = append(ids, m.ContentID)
+			seen[m.ContentID] = true
+		}
 	}
 	items, err := repo.GetByIDsWithAccess(ctx, ids, v.Access)
 	if err != nil {
