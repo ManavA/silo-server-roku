@@ -1893,6 +1893,7 @@ func (h *PlaybackHandler) HandleGetTranscodeManifest(w http.ResponseWriter, r *h
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Transcode manifest not ready")
 		return
 	}
+	playback.WarnIfPlaylistOversized(r.Context(), "api", sessionID, manifest)
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	// no-transform keeps proxies and CDNs from re-encoding the playlist,
@@ -2253,11 +2254,13 @@ func (h *PlaybackHandler) relayToTranscodeNode(w http.ResponseWriter, r *http.Re
 	// the same verified token can be re-injected into the node's manifest segment
 	// URIs below.
 	var validToken string
+	var validClaims *streamtoken.Claims
 	if stToken != "" && h.JWTSecret != "" {
 		claims, verifyErr := streamtoken.Verify(stToken, h.JWTSecret)
 		if verifyErr == nil && claims.SessionID == sessionID {
 			req.Header.Set("X-Silo-Stream-Token", stToken)
 			validToken = stToken
+			validClaims = claims
 		} else if verifyErr != nil {
 			slog.WarnContext(r.Context(), "stream token not forwarded to transcode node", "component", "api", "error", verifyErr, "playback_session_id", sessionID)
 		}
@@ -2276,12 +2279,22 @@ func (h *PlaybackHandler) relayToTranscodeNode(w http.ResponseWriter, r *http.Re
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if isRedirectStatus(resp.StatusCode) && refusesRelayRedirects(r.Context()) {
+		// The Location is not logged: it may carry a signed token.
+		slog.WarnContext(r.Context(), "transcode node answered a redirect; not relayed", "component", "api", "status", resp.StatusCode, "playback_session_id", sessionID)
+		writeTranscodeNodeUnavailable(w)
+		return nil
+	}
+
 	// The node strips "st" from the request query (kept out of node URLs/logs),
 	// so the segment/init URIs in the manifest it builds carry no token. Without
 	// it, a segment fetched after a node or API restart cannot reconstruct the
 	// session and 404s. Re-inject the client-facing token into every URI at this
 	// boundary so the client's later segment requests carry "st" again. Only the
-	// manifest body is rewritten; segments stream through untouched.
+	// manifest body is rewritten; segments stream through untouched. For a
+	// client that negotiated hls_variable_substitution_v1, a long title's
+	// playlist carries the token once (EXT-X-DEFINE) instead of on every segment
+	// URI, which would put it over the 4 MiB some players accept.
 	if validToken != "" && resp.StatusCode == http.StatusOK && strings.HasSuffix(path, ".m3u8") {
 		body, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
@@ -2289,7 +2302,13 @@ func (h *PlaybackHandler) relayToTranscodeNode(w http.ResponseWriter, r *http.Re
 			writeTranscodeNodeUnavailable(w)
 			return nil
 		}
-		rewritten := playback.AppendManifestQueryParam(body, streamTokenParam, validToken)
+		var rewritten []byte
+		if validClaims.HLSVariableSubstitution {
+			rewritten = playback.AppendManifestQueryParamWithSubstitution(body, streamTokenParam, validToken)
+		} else {
+			rewritten = playback.AppendManifestQueryParam(body, streamTokenParam, validToken)
+		}
+		playback.WarnIfPlaylistOversized(r.Context(), "api", sessionID, rewritten)
 		for k, vv := range resp.Header {
 			if http.CanonicalHeaderKey(k) == "Content-Length" {
 				continue

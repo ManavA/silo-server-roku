@@ -112,6 +112,7 @@ type RecipeCard struct {
 	ToneMapDVRPUPresent        bool                   `json:"tone_map_dv_rpu_present,omitempty"`
 	VideoBitstreamFilter       string                 `json:"video_bitstream_filter,omitempty"`
 	VideoSampleEntry           string                 `json:"video_sample_entry,omitempty"`
+	VideoRange                 string                 `json:"video_range,omitempty"`
 	CopyVideoMPEGTS            bool                   `json:"copy_video_mpegts,omitempty"`
 	SeparateAudioHLS           bool                   `json:"separate_audio_hls,omitempty"`
 	DV7ToDV81                  bool                   `json:"dv7_to_dv81,omitempty"`
@@ -141,6 +142,11 @@ type RecipeCard struct {
 	TotalDuration              float64                `json:"total_duration"`
 	FastStart                  bool                   `json:"fast_start,omitempty"`
 	ThrottleSeconds            int                    `json:"throttle_seconds,omitempty"`
+
+	// HLSVariableSubstitution mirrors TranscodeOpts.HLSVariableSubstitution so
+	// a reconstructed session, and the API relaying a node's playlist, keep
+	// the playlist form the client negotiated.
+	HLSVariableSubstitution bool `json:"hls_variable_substitution,omitempty"`
 }
 
 const playMethodCopyFMP4V1 PlayMethod = streamtoken.PlayMethodCopyFMP4Transcode
@@ -250,6 +256,7 @@ func NewRecipeCard(userID int, profileID string, mediaFileID int, transcodeNodeU
 		ToneMapDVRPUPresent:        opts.ToneMapDVRPUPresent,
 		VideoBitstreamFilter:       opts.VideoBitstreamFilter,
 		VideoSampleEntry:           opts.VideoSampleEntry,
+		VideoRange:                 opts.VideoRange,
 		CopyVideoMPEGTS:            opts.CopyVideoMPEGTS,
 		SeparateAudioHLS:           opts.SeparateAudioHLS,
 		DV7ToDV81:                  opts.DV7ToDV81,
@@ -279,6 +286,7 @@ func NewRecipeCard(userID int, profileID string, mediaFileID int, transcodeNodeU
 		TotalDuration:              opts.TotalDuration,
 		FastStart:                  opts.FastStart,
 		ThrottleSeconds:            opts.ThrottleSeconds,
+		HLSVariableSubstitution:    opts.HLSVariableSubstitution,
 	}
 }
 
@@ -359,6 +367,7 @@ func (c RecipeCard) TranscodeOpts(outputDir, ffmpegPath string, logSink FFmpegLo
 		ToneMapDVRPUPresent:        c.ToneMapDVRPUPresent,
 		VideoBitstreamFilter:       c.VideoBitstreamFilter,
 		VideoSampleEntry:           c.VideoSampleEntry,
+		VideoRange:                 c.VideoRange,
 		CopyVideoMPEGTS:            c.CopyVideoMPEGTS,
 		SeparateAudioHLS:           c.SeparateAudioHLS,
 		DV7ToDV81:                  c.DV7ToDV81,
@@ -389,6 +398,7 @@ func (c RecipeCard) TranscodeOpts(outputDir, ffmpegPath string, logSink FFmpegLo
 		TotalDuration:              c.TotalDuration,
 		FastStart:                  c.FastStart,
 		ThrottleSeconds:            c.ThrottleSeconds,
+		HLSVariableSubstitution:    c.HLSVariableSubstitution,
 		NodeType:                   "integrated",
 		ExecutionMode:              "integrated",
 		FFmpegLogSink:              logSink,
@@ -479,6 +489,7 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		ToneMapDVRPUPresent:        c.ToneMapDVRPUPresent,
 		VideoBitstreamFilter:       c.VideoBitstreamFilter,
 		VideoSampleEntry:           c.VideoSampleEntry,
+		VideoRange:                 c.VideoRange,
 		CopyVideoMPEGTS:            c.CopyVideoMPEGTS,
 		SeparateAudioHLS:           c.SeparateAudioHLS,
 		DV7ToDV81:                  c.DV7ToDV81,
@@ -502,6 +513,7 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		CopyAudioCodec:             c.CopyAudioCodec,
 		TargetAudioChannels:        targetAudioChannels,
 		TargetAudioBitrateKbps:     c.TargetAudioBitrateKbps,
+		HLSVariableSubstitution:    c.HLSVariableSubstitution,
 	}
 }
 
@@ -572,6 +584,7 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		ToneMapDVRPUPresent:           c.ToneMapDVRPUPresent,
 		VideoBitstreamFilter:          c.VideoBitstreamFilter,
 		VideoSampleEntry:              c.VideoSampleEntry,
+		VideoRange:                    c.VideoRange,
 		CopyVideoMPEGTS:               c.CopyVideoMPEGTS,
 		SeparateAudioHLS:              c.SeparateAudioHLS,
 		DV7ToDV81:                     c.DV7ToDV81,
@@ -599,6 +612,7 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		TotalDuration:                 c.TotalDuration,
 		FastStart:                     c.FastStart,
 		ThrottleSeconds:               c.ThrottleSeconds,
+		HLSVariableSubstitution:       c.HLSVariableSubstitution,
 	}
 	if c.OriginalStartedAtUnixNano != 0 {
 		card.OriginalStartedAt = time.Unix(0, c.OriginalStartedAtUnixNano).UTC()

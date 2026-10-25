@@ -124,7 +124,7 @@ func newNativeHeaderAuthRestartFixtureV3(t *testing.T, recipe string) (headerAut
 					t.Errorf("decode executor start: %v", err)
 				}
 				starts <- request
-				writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: request.SessionID, Status: "started", CopyFMP4RecipeVersion: request.CopyFMP4RecipeVersion, AudioRecipeVersion: request.AudioRecipeVersion, ThrottleSeconds: request.ThrottleSeconds, KeyframePlaylist: request.KeyframePlaylist})
+				writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: request.SessionID, Status: "started", CopyVideoMPEGTS: request.CopyVideoMPEGTS, CopyFMP4RecipeVersion: request.CopyFMP4RecipeVersion, AudioRecipeVersion: request.AudioRecipeVersion, ThrottleSeconds: request.ThrottleSeconds, KeyframePlaylist: request.KeyframePlaylist})
 			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/transcode/"):
 				_, _ = io.WriteString(w, "#EXTM3U\n#EXTINF:6,\nseg_00001.ts\n")
 			default:

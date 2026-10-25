@@ -86,6 +86,8 @@ jobs:
           context: .
           platforms: linux/${{ matrix.arch }}
           load: true
+          pull: true
+          no-cache-filters: runtime
           tags: ${{ env.IMAGE }}:${{ inputs.version }}-${{ matrix.arch }}
           build-args: |
             BUILD_REVISION=${{ github.sha }}
