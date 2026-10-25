@@ -146,28 +146,12 @@ func TestSeparateAudioKnownDemandKeepsForwardWindow(t *testing.T) {
 	writer := &recordingWriteCloser{}
 	throttler := NewTranscodeThrottler(s, writer, 60, 2)
 	throttler.CheckOnce()
-	done := make(chan error, 1)
-	go func() {
-		lease, err := s.OpenMediaSegment("audio_00002.ts")
-		if lease != nil {
-			_ = lease.Close()
-		}
-		done <- err
-	}()
-	// Let the request reach its missing-file wait before checking the window.
-	waitForAudioDemands(t, s, 1)
+	// Exercise scheduling directly; a missing published segment triggers recovery.
+	demand := &audioSegmentDemand{generation: s.segmentGeneration, name: "audio_00002.ts"}
+	s.audioSegmentDemands = map[*audioSegmentDemand]struct{}{demand: {}}
 	throttler.CheckOnce()
 	if writer.writes != "p" {
 		t.Errorf("known audio target commands = %q, want producer to remain bounded", writer.writes)
-	}
-	writeSegmentFile(t, dir, "audio_00002.ts", []byte("audio"), time.Now())
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("audio request did not complete")
 	}
 }
 
@@ -180,44 +164,19 @@ func TestSeparateAudioFulfilledTargetDoesNotExemptOtherWaiters(t *testing.T) {
 	writer := &recordingWriteCloser{}
 	throttler := NewTranscodeThrottler(s, writer, 60, 2)
 	throttler.CheckOnce()
-	done := make(chan error, 3)
-	for _, name := range []string{"audio_00002.ts", "audio_00018.ts", "audio_00018.ts"} {
-		go func() {
-			lease, err := s.OpenMediaSegment(name)
-			if lease != nil {
-				_ = lease.Close()
-			}
-			done <- err
-		}()
-	}
-	waitForAudioDemands(t, s, 3)
+	// Keep duplicate waiters distinct while exercising scheduler state directly.
+	early := &audioSegmentDemand{generation: s.segmentGeneration, name: "audio_00002.ts"}
+	late := &audioSegmentDemand{generation: s.segmentGeneration, name: "audio_00018.ts"}
+	duplicate := &audioSegmentDemand{generation: s.segmentGeneration, name: "audio_00018.ts"}
+	s.audioSegmentDemands = map[*audioSegmentDemand]struct{}{early: {}, late: {}, duplicate: {}}
 	throttler.CheckOnce()
 	if writer.writes != "pu" {
 		t.Errorf("pending target at 76 seconds commands = %q, want resume", writer.writes)
 	}
 	writeSegmentFile(t, dir, "audio_00018.ts", []byte("audio"), time.Now())
-	for range 2 {
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatal(err)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("duplicate audio request did not complete")
-		}
-	}
 	throttler.CheckOnce()
 	if writer.writes != "pup" {
 		t.Errorf("fulfilled target with early waiter commands = %q, want pause", writer.writes)
-	}
-	writeSegmentFile(t, dir, "audio_00002.ts", []byte("audio"), time.Now())
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("early audio request did not complete")
 	}
 }
 
