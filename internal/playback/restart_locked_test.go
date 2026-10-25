@@ -275,13 +275,15 @@ printf '%s' '{"packets":[{"stream_index":0,"dts_time":"0"},{"stream_index":1,"dt
 				done <- err
 			}()
 			t.Cleanup(func() { _ = s.Close(); <-done })
+			ticker := time.NewTicker(time.Millisecond)
+			defer ticker.Stop()
 			deadline := time.Now().Add(2 * time.Second)
 			for writer.writes != "pu" {
 				throttler.CheckOnce()
 				if time.Now().After(deadline) {
 					t.Fatal("audio request never resumed producer")
 				}
-				time.Sleep(time.Millisecond)
+				<-ticker.C
 			}
 			if changed {
 				s.SetAudioTrackIndex(1)

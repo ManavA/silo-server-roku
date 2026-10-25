@@ -272,3 +272,51 @@ func TestDV7FragmentConversionAccountsForProcessesAndReleasesFailedWork(t *testi
 		})
 	}
 }
+
+func TestLiveDVConversionHonorsTranscodingToggle(t *testing.T) {
+	dir := t.TempDir()
+	raw := filepath.Join(dir, dv7SourceDirectory)
+	if err := os.MkdirAll(raw, 0700); err != nil {
+		t.Fatal(err)
+	}
+	init, fragment := dvFragmentTestMedia(t)
+	for name, data := range map[string][]byte{hlsInitFilename: init, "seg_00000.m4s": fragment, "seg_00001.m4s": fragment} {
+		if err := os.WriteFile(filepath.Join(raw, name), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(dir, "conversions")
+	t.Setenv("SILO_DV_LIVE_MARKER", marker)
+	tool := filepath.Join(dir, "converter")
+	script := "#!/bin/sh\necho run >> \"$SILO_DV_LIVE_MARKER\"\nprintf '\\000\\000\\000\\001\\174\\001\\201' > \"$8\"\n"
+	if err := os.WriteFile(tool, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	session := &TranscodeSession{outputDir: dir, dvContext: t.Context(), dvToolPath: tool, segmentGeneration: 1, opts: TranscodeOpts{DV7ToDV81: true, SeparateAudioHLS: true, TargetCodecVideo: "copy", SourceVideoCodec: "hevc", VideoSampleEntry: VideoSampleEntryDVH1, TranscodePolicy: &TranscodePolicy{Enabled: func() bool { return enabled }}}}
+	if _, err := session.GetSegment("seg_00000.m4s"); err != nil {
+		t.Fatal(err)
+	}
+	enabled = false
+	if _, err := session.GetSegment("seg_00000.m4s"); err != nil {
+		t.Fatalf("cached segment: %v", err)
+	}
+	if _, err := session.GetSegment("seg_00001.m4s"); err == nil || !strings.Contains(err.Error(), "transcoding is disabled") {
+		t.Fatalf("disabled conversion: %v", err)
+	}
+	if err := session.Restart(t.Context(), 0, 0); err == nil || !strings.Contains(err.Error(), "transcoding is disabled") {
+		t.Fatalf("disabled restart: %v", err)
+	}
+	calls, err := os.ReadFile(marker)
+	if err != nil || string(calls) != "run\n" {
+		t.Fatalf("disabled work launched converter: %q, %v", calls, err)
+	}
+	enabled = true
+	if _, err := session.GetSegment("seg_00001.m4s"); err != nil {
+		t.Fatalf("re-enabled conversion: %v", err)
+	}
+	calls, err = os.ReadFile(marker)
+	if err != nil || string(calls) != "run\nrun\n" {
+		t.Fatalf("re-enabled converter calls: %q, %v", calls, err)
+	}
+}

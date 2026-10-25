@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 
 	"github.com/Eyevinn/mp4ff/mp4"
+
 	"github.com/Silo-Server/silo-server/internal/processmetrics"
 )
 
@@ -25,6 +26,10 @@ var dvConversionSlots = make(chan struct{}, 2)
 // remuxing raw HEVC would lose the copied samples' timestamps and durations.
 // Input must be a single, clear, video-only fMP4 fragment and its original init.
 func ConvertDV7Fragment(ctx context.Context, toolPath string, initData, fragmentData []byte) ([]byte, []byte, error) {
+	return convertDV7FragmentWithPolicy(ctx, toolPath, initData, fragmentData, nil)
+}
+
+func convertDV7FragmentWithPolicy(ctx context.Context, toolPath string, initData, fragmentData []byte, policy *TranscodePolicy) ([]byte, []byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -48,7 +53,7 @@ func ConvertDV7Fragment(ctx context.Context, toolPath string, initData, fragment
 	if err != nil {
 		return nil, nil, err
 	}
-	converted, err := convertDV7AnnexB(ctx, toolPath, annexB)
+	converted, err := convertDV7AnnexBWithPolicy(ctx, toolPath, annexB, policy)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -241,6 +246,10 @@ func lengthPrefixedHEVCNALs(data []byte) ([][]byte, error) {
 }
 
 func convertDV7AnnexB(ctx context.Context, toolPath string, data []byte) ([]byte, error) {
+	return convertDV7AnnexBWithPolicy(ctx, toolPath, data, nil)
+}
+
+func convertDV7AnnexBWithPolicy(ctx context.Context, toolPath string, data []byte, policy *TranscodePolicy) ([]byte, error) {
 	dir, err := os.MkdirTemp("", "silo-dv-convert-")
 	if err != nil {
 		return nil, err
@@ -252,6 +261,9 @@ func convertDV7AnnexB(ctx context.Context, toolPath string, data []byte) ([]byte
 	}
 	// #nosec G204 G702 -- toolPath is resolved from the server PATH; arguments use private temporary files without a shell.
 	cmd := exec.CommandContext(ctx, toolPath, "-m", "2", "convert", "--discard", "-i", input, "-o", output)
+	if err := policy.check(); err != nil {
+		return nil, err
+	}
 	err = cmd.Run()
 	processmetrics.Record(processmetrics.Transcode, cmd.ProcessState, err, ctx.Err())
 	if err != nil {

@@ -106,7 +106,7 @@ func serverDV81PlannerInputV3() PlannerInputV3 {
 	hls.HDRDetails = hdr
 	hls.Features = []string{"native_hls_playback_v1", "native_hls_separate_audio_v1"}
 	req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = hls
-	return PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Registry: NewTransformationRegistryV3([]TransformationSpecV3{{Name: "server_dv7_to_dv81", RecipeVersion: "1", Available: true}, {Name: "hls_separate_audio", RecipeVersion: "1", Available: true}})}
+	return PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true}, Registry: NewTransformationRegistryV3([]TransformationSpecV3{{Name: "server_dv7_to_dv81", RecipeVersion: "1", Available: true}, {Name: "hls_separate_audio", RecipeVersion: "1", Available: true}})}
 }
 
 func TestPlanPlaybackV3ServerDV81PreservesSourceIdentity(t *testing.T) {
@@ -144,6 +144,8 @@ func TestPlanPlaybackV3ServerDV81FailsClosed(t *testing.T) {
 		name   string
 		change func(*PlannerInputV3)
 	}{
+		{"transcoding disabled", func(input *PlannerInputV3) { input.Settings.TranscodeEnabled = false }},
+		{"viewer transcoding disabled", func(input *PlannerInputV3) { input.Settings.ViewerTranscodeDisabled = true }},
 		{"no opt in", func(input *PlannerInputV3) { input.Request.ClientFeatures = []string{ClientNativeHLSSeparateAudioV3} }},
 		{"no executor", func(input *PlannerInputV3) { input.Registry = NewTransformationRegistryV3(nil) }},
 		{"output level too low", func(input *PlannerInputV3) { input.EffectiveFile.VideoTracks[0].DVLevel = 7 }},

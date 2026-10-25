@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/DataDog/go-sqllexer v0.2.5
+	github.com/Eyevinn/mp4ff v0.60.0
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.29
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.105.2
@@ -55,7 +56,6 @@ require (
 
 require (
 	cloud.google.com/go v0.123.0 // indirect
-	github.com/Eyevinn/mp4ff v0.60.0 // indirect
 	github.com/PuerkitoBio/goquery v1.8.0 // indirect
 	github.com/TwiN/go-color v1.4.1 // indirect
 	github.com/agnivade/levenshtein v1.2.1 // indirect

@@ -5,7 +5,7 @@ import "github.com/Silo-Server/silo-server/internal/models"
 // planServerDV7ToDV81V3 validates converted output as Profile 8.1, then restores
 // the source descriptor so file and selected track identities remain stable.
 func planServerDV7ToDV81V3(input PlannerInputV3, file *models.MediaFile, source SourceDescriptorV3) (PlannerResultV3, bool) {
-	if source.DVProfile != 7 || source.VideoCopyUnsafe || !source.DVBaseLayerProven || source.DVBLCompatID != 6 || len(file.VideoTracks) == 0 || !file.VideoTracks[0].DVRPUPresent ||
+	if !input.Settings.TranscodeEnabled || input.Settings.ViewerTranscodeDisabled || source.DVProfile != 7 || source.VideoCopyUnsafe || !source.DVBaseLayerProven || source.DVBLCompatID != 6 || len(file.VideoTracks) == 0 || !file.VideoTracks[0].DVRPUPresent ||
 		!HasFeatureV3(input.Request.ClientFeatures, FeatureServerDV7ToDV81V3) || nativeHLSPackagingV3(input.Request) != TransformationHLSSeparateAudioV3 {
 		return PlannerResultV3{}, false
 	}

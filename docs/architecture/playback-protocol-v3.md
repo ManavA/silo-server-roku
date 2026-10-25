@@ -1913,7 +1913,14 @@ renditions reuse bounded prune batches, freshness guards and generation fences.
 An already-open response retains its file descriptor across unlink.
 
 `server_dv7_to_dv81_v1` is an additional client feature, not a claim that the
-client can decode Profile 7. The planner requires proven Profile 7 base/RPU
+client can decode Profile 7. Server conversion requires the existing
+`playback.transcode_enabled` setting. Disabling it removes this feature from
+the native capability document and prevents new or reconstructed conversion
+recipes on API and worker executors. Live sessions recheck the setting before
+converting an uncached fragment or restarting; converted segments remain
+readable. Ordinary native HLS packaging remains available. Conversion smoke tests are also skipped while disabled; the
+existing probe retry window can delay re-enablement by up to 15 seconds. The
+planner requires proven Profile 7 base/RPU
 facts and validates Profile 8.1 against the output's profile, compatibility ID
 and level limits. It keeps the original file and track identities. An executor
 must pass a bounded `dovi_tool -m 2 convert --discard` smoke test that checks a

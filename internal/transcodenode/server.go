@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1476,7 +1477,9 @@ func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HW
 	ffmpegPath := ""
 	configuredHWAccel := playback.HWAccelNone
 	hwDevice := ""
+	transcodeEnabled := false
 	if cfg := s.watcher.Config(); cfg != nil {
+		transcodeEnabled = cfg.Playback.TranscodeEnabled
 		ffmpegPath = cfg.Playback.FFmpegPath
 		configuredHWAccel = cfg.Playback.HWAccel
 		hwDevice = cfg.Playback.HWDevice
@@ -1500,11 +1503,16 @@ func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HW
 		return playback.HWAccelInfo{}, err
 	}
 	info.ToneMapCapabilities = capabilities
-	registry, err := playback.ProbeTransformationRegistryWithToneMapV3Result(resolveCtx, ffmpegPath, info.ToneMapCapabilities)
+	registry, err := playback.ProbeTransformationRegistryWithPlaybackPolicyV3Result(resolveCtx, ffmpegPath, info.ToneMapCapabilities, transcodeEnabled)
 	if err != nil {
 		return playback.HWAccelInfo{}, err
 	}
 	info.Transformations = registry.Advertised()
+	if !transcodeEnabled {
+		info.Transformations = slices.DeleteFunc(info.Transformations, func(t playback.TransformationV3) bool {
+			return t.Name == playback.TransformationServerDV7DV81V3
+		})
+	}
 	// Progressive remux tokens bind execution to the stable stream_nodes row.
 	// Do not let central commit work to this node until the watcher can resolve
 	// that identity; otherwise every committed GET would fail closed at serve
@@ -1716,6 +1724,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node not configured", http.StatusServiceUnavailable)
 		return
 	}
+	if req.DV7ToDV81 && !cfg.Playback.TranscodeEnabled {
+		http.Error(w, "transcoding is disabled", http.StatusServiceUnavailable)
+		return
+	}
 	// Held from here until the handler returns, by which point activeJobs
 	// covers the session. Without the overlap a re-probe could start in the gap
 	// between admitting this transcode and it becoming visible as an active
@@ -1784,6 +1796,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		FFmpegLogSink:      s.ffmpegSink,
 	}
 
+	opts.TranscodePolicy = &playback.TranscodePolicy{Enabled: func() bool {
+		current := s.watcher.Config()
+		return current != nil && current.Playback.TranscodeEnabled
+	}}
 	if opts.HWAccel == "" && cfg.Playback.HWAccel != "" {
 		opts.HWAccel = cfg.Playback.HWAccel
 	}
@@ -2097,6 +2113,9 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	if cfg == nil {
 		return nil, nil
 	}
+	if card.DV7ToDV81 && !cfg.Playback.TranscodeEnabled {
+		return nil, errors.New("transcoding is disabled")
+	}
 	// A reconstruct spawns ffmpeg on the GPU exactly as a fresh start does, so
 	// it takes the same exclusion against a running capability re-probe. Held
 	// until this call returns, by which point activeJobs covers the session.
@@ -2108,6 +2127,10 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	defer s.gpu.endWork()
 	outputDir := s.sessionOutputDir(sessionID)
 	opts := card.TranscodeOpts(outputDir, cfg.Playback.FFmpegPath, s.ffmpegSink)
+	opts.TranscodePolicy = &playback.TranscodePolicy{Enabled: func() bool {
+		current := s.watcher.Config()
+		return current != nil && current.Playback.TranscodeEnabled
+	}}
 	opts.SessionID = sessionID
 	opts.Reconstructed = true
 	// Recipe cards preserve the original launch tuning, but reconstruction must

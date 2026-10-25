@@ -46,7 +46,22 @@ func ProbeTransformationRegistryWithToneMapV3(ctx context.Context, ffmpegPath st
 // ProbeTransformationRegistryWithToneMapV3Result reports incomplete baseline
 // probing and caller cancellation. An incomplete optional HEVC probe leaves
 // baseline capabilities usable and marks the registry for a later refresh.
+// DV conversion is excluded from this unscoped inventory.
 func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegPath string, toneMapCapabilities tonemap.Capabilities) (*TransformationRegistryV3, error) {
+	return probeTransformationRegistryWithPlaybackPolicyV3Result(ctx, ffmpegPath, toneMapCapabilities, false)
+}
+
+// ProbeTransformationRegistryWithPlaybackPolicyV3Result admits conversion smoke
+// tests only when the caller's existing playback policy permits transcoding.
+func ProbeTransformationRegistryWithPlaybackPolicyV3Result(ctx context.Context, ffmpegPath string, toneMapCapabilities tonemap.Capabilities, transcodeEnabled bool) (*TransformationRegistryV3, error) {
+	registry, err := probeTransformationRegistryWithPlaybackPolicyV3Result(ctx, ffmpegPath, toneMapCapabilities, transcodeEnabled)
+	if !transcodeEnabled {
+		registry.refreshAfter = time.Now().Add(transformationProbeRetryDelayV3)
+	}
+	return registry, err
+}
+
+func probeTransformationRegistryWithPlaybackPolicyV3Result(ctx context.Context, ffmpegPath string, toneMapCapabilities tonemap.Capabilities, transcodeEnabled bool) (*TransformationRegistryV3, error) {
 	// Resolve exactly like the execution paths (remux and transcode) so every
 	// capability advertised here holds for the binary that later runs.
 	ffmpegPath = ResolveFFmpegPath(ffmpegPath)
@@ -63,7 +78,11 @@ func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegP
 	hevcRecipeErr, hevcRecipeContextErr := probeHEVCRecipeV3(ctx, ffmpegPath, encoders)
 	_, ffmpegErr := exec.LookPath(ffmpegPath)
 	_, ffprobeErr := exec.LookPath(ffprobePathFromFFmpeg(ffmpegPath))
-	_, dv81Available := probeDV7ToDV81ToolchainV3(ctx)
+	dv81Available := false
+	conversionAllowed := transcodeEnabled
+	if conversionAllowed {
+		_, dv81Available = probeDV7ToDV81ToolchainV3(ctx)
+	}
 	registry := NewTransformationRegistryV3([]TransformationSpecV3{
 		{Name: TransformationServerDV7DV81V3, RecipeVersion: TransformationServerDV7DV81RecipeVersionV3, Available: ffmpegErr == nil && ffprobeErr == nil && dv81Available, RequiredCapability: "dovi_tool:mode2+mp4_fragment_timing_v1", PromisedDynamicRange: DynamicRangeDolbyVisionV3, ValidatedClaims: []string{ClaimHDR10BaseLayerPreservedV3, ClaimEnhancementLayerDiscardedV3, "dolby_vision_profile_8_1"}, TerminalReason: TerminalDVConversionUnsupportedV3},
 		{Name: TransformationHLSSeparateAudioV3, RecipeVersion: TransformationHLSSeparateAudioRecipeVersionV3, Available: ffmpegErr == nil && ffprobeErr == nil, RequiredCapability: "ffmpeg_muxer:hls+mpegts"},

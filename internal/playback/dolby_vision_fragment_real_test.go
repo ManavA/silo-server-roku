@@ -134,7 +134,10 @@ func TestDV7ToolchainProbeRealTool(t *testing.T) {
 	if err != nil {
 		t.Skip("FFmpeg is unavailable")
 	}
-	registry := ProbeTransformationRegistryV3(t.Context(), ffmpeg)
+	registry, err := ProbeTransformationRegistryWithPlaybackPolicyV3Result(t.Context(), ffmpeg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !registry.Available(TransformationServerDV7DV81V3) {
 		t.Fatal("working DV7 converter is not advertised")
 	}

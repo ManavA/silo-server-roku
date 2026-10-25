@@ -27,6 +27,7 @@ import (
 // internal/playback does not import internal/config (avoiding an import cycle);
 // each embedding handler adapts its own config snapshot into this shape.
 type TranscodeRuntimeConfig struct {
+	TranscodeEnabled        bool
 	TranscodeDir            string
 	FFmpegPath              string
 	HWAccel                 string
@@ -161,7 +162,7 @@ func (m *TranscodeManager) logSink() FFmpegLogSink {
 
 func (m *TranscodeManager) runtimeConfig() TranscodeRuntimeConfig {
 	if m.Config == nil {
-		return TranscodeRuntimeConfig{TranscodeDir: filepath.Join(os.TempDir(), "silo-transcode")}
+		return TranscodeRuntimeConfig{TranscodeEnabled: true, TranscodeDir: filepath.Join(os.TempDir(), "silo-transcode")}
 	}
 	return m.Config()
 }
@@ -978,8 +979,12 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	defer release()
 
 	cfg := m.runtimeConfig()
+	if card.DV7ToDV81 && !cfg.TranscodeEnabled {
+		return nil, errors.New("transcoding is disabled")
+	}
 	outputDir := reconstructionOutputDir(cfg.TranscodeDir, sessionID, card.OutputSubdir)
 	opts := card.TranscodeOpts(outputDir, cfg.FFmpegPath, m.logSink())
+	opts.TranscodePolicy = &TranscodePolicy{Enabled: func() bool { return m.runtimeConfig().TranscodeEnabled }}
 	opts.Reconstructed = true
 	// Recipe cards preserve the original launch tuning, but a reconstruction is
 	// not a fresh generation: restore the conservative manifest lead so recovery

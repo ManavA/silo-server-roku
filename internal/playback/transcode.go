@@ -34,6 +34,16 @@ func init() {
 }
 
 // TranscodeOpts holds configuration for an HLS transcode session.
+// TranscodePolicy supplies current runtime policy without persisting a setting snapshot.
+type TranscodePolicy struct{ Enabled func() bool }
+
+func (p *TranscodePolicy) check() error {
+	if p != nil && p.Enabled != nil && !p.Enabled() {
+		return errors.New("transcoding is disabled")
+	}
+	return nil
+}
+
 type TranscodeOpts struct {
 	InputPath string
 	OutputDir string // e.g., /tmp/silo-transcode/{session_id}/
@@ -54,10 +64,12 @@ type TranscodeOpts struct {
 	// durable because the segment extension and bytes must survive restarts.
 	CopyVideoMPEGTS              bool
 	separateAudioTimestampOffset float64
-	DV7ToDV81                    bool   `json:"dv7_to_dv81,omitempty"`
-	SeparateAudioHLS             bool   `json:"separate_audio_hls,omitempty"`
-	HLSCodecs                    string `json:"hls_codecs,omitempty"`
-	HLSVideoRange                string `json:"hls_video_range,omitempty"`
+	DV7ToDV81                    bool `json:"dv7_to_dv81,omitempty"`
+	// TranscodePolicy reads current policy before new DV conversion work.
+	TranscodePolicy  *TranscodePolicy `json:"-"`
+	SeparateAudioHLS bool             `json:"separate_audio_hls,omitempty"`
+	HLSCodecs        string           `json:"hls_codecs,omitempty"`
+	HLSVideoRange    string           `json:"hls_video_range,omitempty"`
 	// KeyframePlaylist serves a copy-video stream that starts at the
 	// beginning as one complete VOD playlist planned from the source's
 	// keyframe index, instead of FFmpeg's growing playlist (#1466). It is

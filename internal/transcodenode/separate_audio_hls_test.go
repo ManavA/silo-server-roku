@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,5 +76,15 @@ JSON
 	}
 	if session.LastRequestedSegment() != 0 {
 		t.Fatal("audio recovery advanced the video ordinal")
+	}
+}
+
+func TestDVConversionStartRequiresTranscoding(t *testing.T) {
+	server := newTestServer(t)
+	request := httptest.NewRequest(http.MethodPost, "/transcode/start", strings.NewReader(`{"session_id":"dv-policy","input_path":"fixture.mkv","target_codec_video":"copy","copy_fmp4_recipe_version":"4","separate_audio_hls":true,"dv7_to_dv81":true}`))
+	response := httptest.NewRecorder()
+	server.handleStart(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "transcoding is disabled") {
+		t.Fatalf("disabled conversion response = %d %s", response.Code, response.Body.String())
 	}
 }

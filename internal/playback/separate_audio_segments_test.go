@@ -23,7 +23,7 @@ func TestSeparateAudioHLSPrunesOwnTimelineAndPreservesOpenBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Close()
+	defer func() { _ = lease.Close() }()
 	session.ReportMediaSegmentDownloadedForGeneration("audio_00019.ts", 0)
 	waitForPrunerFileMissing(t, filepath.Join(dir, "audio_00014.ts"))
 	for _, number := range []int{0, 1, 15, 16, 17, 18, 19} {
@@ -82,7 +82,7 @@ func TestAudioFirstRecoveryResumesProducerWithoutVideoOrdinal(t *testing.T) {
 		}
 		done <- err
 	}()
-	time.Sleep(150 * time.Millisecond)
+	waitForAudioDemands(t, s, 1)
 	throttler.CheckOnce()
 	if throttler.paused || s.LastRequestedSegment() != 0 {
 		t.Fatal("audio-first recovery did not preserve independent video demand")
@@ -154,7 +154,7 @@ func TestSeparateAudioKnownDemandKeepsForwardWindow(t *testing.T) {
 		done <- err
 	}()
 	// Let the request reach its missing-file wait before checking the window.
-	time.Sleep(150 * time.Millisecond)
+	waitForAudioDemands(t, s, 1)
 	throttler.CheckOnce()
 	if writer.writes != "p" {
 		t.Errorf("known audio target commands = %q, want producer to remain bounded", writer.writes)
@@ -189,7 +189,7 @@ func TestSeparateAudioFulfilledTargetDoesNotExemptOtherWaiters(t *testing.T) {
 			done <- err
 		}()
 	}
-	time.Sleep(150 * time.Millisecond)
+	waitForAudioDemands(t, s, 3)
 	throttler.CheckOnce()
 	if writer.writes != "pu" {
 		t.Errorf("pending target at 76 seconds commands = %q, want resume", writer.writes)
@@ -236,7 +236,7 @@ func TestSeparateAudioOldGenerationCannotAdvanceProducer(t *testing.T) {
 		}
 		done <- err
 	}()
-	time.Sleep(150 * time.Millisecond)
+	waitForAudioDemands(t, s, 1)
 	throttler.CheckOnce()
 	if writer.writes != "" {
 		t.Errorf("cold distant audio request paused producer: %q", writer.writes)
@@ -356,6 +356,8 @@ func TestSeparateAudioRetentionRequiresCurrentTimelineAndOwnAcknowledgement(t *t
 				s.ReportMediaSegmentDownloadedForGeneration("audio_00019.ts", 3)
 			}
 			// Allow scheduled work to finish; checking the file alone can race a pass.
+			ticker := time.NewTicker(time.Millisecond)
+			defer ticker.Stop()
 			deadline := time.Now().Add(time.Second)
 			for {
 				s.mu.Lock()
@@ -367,7 +369,7 @@ func TestSeparateAudioRetentionRequiresCurrentTimelineAndOwnAcknowledgement(t *t
 				if time.Now().After(deadline) {
 					break
 				}
-				time.Sleep(time.Millisecond)
+				<-ticker.C
 			}
 			assertPrunerFileExists(t, path)
 		})
@@ -476,4 +478,25 @@ func TestSeparateAudioRetentionExtendsCachedTimelineFromTail(t *testing.T) {
 	}
 	s.ReportMediaSegmentDownloadedForGeneration("audio_03005.ts", 0)
 	waitForPrunerFileMissing(t, next)
+}
+
+func waitForAudioDemands(t *testing.T, s *TranscodeSession, want int) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		s.mu.Lock()
+		count := len(s.audioSegmentDemands)
+		s.mu.Unlock()
+		if count >= want {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("audio request did not register its demand")
+		}
+	}
 }

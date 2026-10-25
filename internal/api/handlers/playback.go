@@ -356,6 +356,7 @@ func NewPlaybackHandler(sessionMgr SessionManagerInterface, opts ...FilePathReso
 	h.tm.Config = func() playback.TranscodeRuntimeConfig {
 		c := h.playbackConfig()
 		return playback.TranscodeRuntimeConfig{
+			TranscodeEnabled:        c.TranscodeEnabled,
 			TranscodeDir:            c.TranscodeDir,
 			FFmpegPath:              c.FFmpegPath,
 			HWAccel:                 c.HWAccel,

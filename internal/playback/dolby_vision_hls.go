@@ -84,10 +84,13 @@ func (s *TranscodeSession) convertDV7SegmentLocked(ctx context.Context, generati
 		s.mu.Unlock()
 		return ErrSegmentNotFound
 	}
-	dir, tool := s.outputDir, s.dvToolPath
+	dir, tool, policy := s.outputDir, s.dvToolPath, s.opts.TranscodePolicy
 	s.mu.Unlock()
 	if info, err := os.Stat(filepath.Join(dir, name)); err == nil && info.Size() > 0 {
 		return nil
+	}
+	if err := policy.check(); err != nil {
+		return err
 	}
 	rawDir := filepath.Join(dir, dv7SourceDirectory)
 	init, err := readBoundedHLSFile(filepath.Join(rawDir, hlsInitFilename), 2<<20)
@@ -108,7 +111,7 @@ func (s *TranscodeSession) convertDV7SegmentLocked(ctx context.Context, generati
 	}
 	conversionCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	convertedInit, convertedData, err := ConvertDV7Fragment(conversionCtx, tool, init, data)
+	convertedInit, convertedData, err := convertDV7FragmentWithPolicy(conversionCtx, tool, init, data, policy)
 	if err != nil {
 		return err
 	}
@@ -151,6 +154,9 @@ func (s *TranscodeSession) publishDV7File(generation uint64, name string, data [
 func prepareDV7HLS(ctx context.Context, opts TranscodeOpts) (string, error) {
 	if !opts.DV7ToDV81 {
 		return "", nil
+	}
+	if err := opts.TranscodePolicy.check(); err != nil {
+		return "", err
 	}
 	if !opts.SeparateAudioHLS || opts.CopyVideoMPEGTS || !strings.EqualFold(opts.TargetCodecVideo, "copy") || !strings.EqualFold(opts.SourceVideoCodec, "hevc") || opts.VideoSampleEntry != VideoSampleEntryDVH1 {
 		return "", errors.New("unsupported Dolby Vision conversion recipe")

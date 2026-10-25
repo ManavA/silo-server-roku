@@ -193,124 +193,24 @@ func (s *TranscodeSession) pruneDownloadedMediaSegments(generation uint64, downl
 		return
 	}
 
-	var candidates []segmentPruneCandidate
-	moreCandidates := false
-	if pruneBeforeStart {
-		entries, readErr := os.ReadDir(outputDir)
-		if readErr != nil {
-			slog.Warn("read transcode directory for preserved segment pruning", "component", "playback", "error", readErr, "session", opts.SessionID, "playback_session_id", opts.SessionID)
-			s.finishMediaSegmentPrune(audio, generation, fromFloor, targetFloor, downloadedThrough, segmentPruneRetryDelay)
-			return
-		}
-		for _, entry := range entries {
-			segment, parseErr := ParseSegmentNumber(entry.Name())
-			if entry.IsDir() || parseErr != nil || segment >= targetFloor || entry.Name() != pruneSegmentFilename(segment, opts, audio) {
-				continue
-			}
-			if len(candidates) == segmentPruneBatchSize {
-				moreCandidates = true
-				break
-			}
-			candidates = append(candidates, segmentPruneCandidate{
-				number: segment,
-				path:   filepath.Join(outputDir, entry.Name()),
-			})
-		}
-	} else {
-		toSegment := min(targetFloor, fromSegment+segmentPruneBatchSize)
-		for segment := fromSegment; segment < toSegment; segment++ {
-			candidates = append(candidates, segmentPruneCandidate{
-				number: segment,
-				path:   filepath.Join(outputDir, pruneSegmentFilename(segment, opts, audio)),
-			})
-		}
-		moreCandidates = toSegment < targetFloor
+	batch := segmentPruneBatch{generation: generation, opts: opts, outputDir: outputDir, generationStartedAt: generationStartedAt, freshGuard: freshGuard, targetFloor: targetFloor, audio: audio, beforeStart: pruneBeforeStart}
+	candidates, moreCandidates, err := batch.candidates(fromSegment)
+	if err != nil {
+		slog.Warn("read transcode directory for preserved segment pruning", "component", "playback", "error", err, "session", opts.SessionID, "playback_session_id", opts.SessionID)
+		s.finishMediaSegmentPrune(audio, generation, fromFloor, targetFloor, downloadedThrough, segmentPruneRetryDelay)
+		return
 	}
 	if len(candidates) == 0 && !moreCandidates {
 		s.finishMediaSegmentPrune(audio, generation, targetFloor, targetFloor, downloadedThrough, 0)
 		return
 	}
 
-	processedFloor := targetFloor
-	if !pruneBeforeStart {
-		processedFloor = candidates[len(candidates)-1].number + 1
+	result := s.pruneMediaSegmentBatch(batch, candidates)
+	if result.aborted {
+		return
 	}
-	var retryAfter time.Duration
-	removed := 0
-	var freedBytes int64
-	for _, candidate := range candidates {
-		info, err := os.Stat(candidate.path)
-		if errors.Is(err, os.ErrNotExist) && !audio && opts.DV7ToDV81 {
-			rawPath := filepath.Join(outputDir, dv7SourceDirectory, filepath.Base(candidate.path))
-			info, err = os.Stat(rawPath)
-			if err == nil {
-				candidate.path = rawPath
-			}
-		}
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if pruneBeforeStart {
-				retryAfter = max(retryAfter, segmentPruneRetryDelay)
-			} else {
-				processedFloor, retryAfter = earlierPruneRetry(processedFloor, retryAfter, candidate.number, segmentPruneRetryDelay)
-			}
-			slog.Warn("stat downloaded transcode segment", "component", "playback", "error", err, "segment", candidate.number, "session", opts.SessionID, "playback_session_id", opts.SessionID)
-			continue
-		}
-		if audio && !generationStartedAt.IsZero() && info.ModTime().Before(generationStartedAt) {
-			continue
-		}
-		freshUntil := info.ModTime().Add(freshGuard)
-		if delay := time.Until(freshUntil); delay > 0 {
-			if pruneBeforeStart {
-				retryAfter = max(retryAfter, delay)
-			} else {
-				processedFloor, retryAfter = earlierPruneRetry(processedFloor, retryAfter, candidate.number, delay)
-			}
-			continue
-		}
-
-		// Serialize the unlink with restart and shutdown generation changes.
-		// Once either advances the generation, this pass cannot delete files
-		// generated for a replacement timeline or session object.
-		s.mu.Lock()
-		if generation != s.segmentGeneration || s.restarting != nil {
-			if generation == s.segmentGeneration {
-				*fields.running = false
-			}
-			s.mu.Unlock()
-			return
-		}
-		removeErr := os.Remove(candidate.path)
-		rawFreed := int64(0)
-		if removeErr == nil && !audio && opts.DV7ToDV81 && filepath.Dir(candidate.path) == outputDir {
-			rawPath := filepath.Join(outputDir, dv7SourceDirectory, filepath.Base(candidate.path))
-			rawInfo, statErr := os.Stat(rawPath)
-			rawErr := os.Remove(rawPath)
-			if rawErr == nil && statErr == nil {
-				rawFreed = rawInfo.Size()
-			}
-			if rawErr != nil && !errors.Is(rawErr, os.ErrNotExist) {
-				removeErr = rawErr
-			}
-		}
-		s.mu.Unlock()
-		if removeErr != nil {
-			if !errors.Is(removeErr, os.ErrNotExist) {
-				if pruneBeforeStart {
-					retryAfter = max(retryAfter, segmentPruneRetryDelay)
-				} else {
-					processedFloor, retryAfter = earlierPruneRetry(processedFloor, retryAfter, candidate.number, segmentPruneRetryDelay)
-				}
-				slog.Warn("remove downloaded transcode segment", "component", "playback", "error", removeErr, "segment", candidate.number, "session", opts.SessionID, "playback_session_id", opts.SessionID)
-			}
-			continue
-		}
-		removed++
-		freedBytes += info.Size() + rawFreed
-	}
+	processedFloor, retryAfter := result.floor, result.retryAfter
+	removed, freedBytes := result.removed, result.freedBytes
 	if pruneBeforeStart && (moreCandidates || retryAfter > 0) {
 		processedFloor = fromFloor
 	}
@@ -370,22 +270,11 @@ func (s *TranscodeSession) mediaSegmentRetentionFloor(generation uint64, opts Tr
 	manifestPath := filepath.Join(s.outputDir, "stream.m3u8")
 	if audio {
 		manifestPath = filepath.Join(s.outputDir, hlsAudioManifestFilename)
-		s.mu.Lock()
-		started := s.generationStartedAt
-		s.mu.Unlock()
-		if !index.loaded {
-			// Reuse the throttle/recovery snapshot when it already observed this manifest.
-			timeline, info, snapshotErr := s.audioTimelineSnapshot(s.outputDir)
-			if snapshotErr != nil {
-				return 0, false, snapshotErr
-			}
-			if timeline.mediaSequence != opts.StartSegmentNumber || (!started.IsZero() && info.ModTime().Before(started)) {
-				return 0, false, nil
-			}
-			if err := index.replace(timeline.entries); err != nil {
-				return 0, false, err
-			}
+		ready, err := s.prepareAudioRetentionIndex(index, opts)
+		if err != nil || !ready {
+			return 0, false, err
 		}
+
 	}
 	if err := index.loadThrough(manifestPath, downloadedThrough); err != nil {
 		return 0, false, err
@@ -605,4 +494,160 @@ func (s *TranscodeSession) finishMediaSegmentPrune(
 	} else {
 		s.scheduleSegmentPruneLocked()
 	}
+}
+
+type segmentPruneBatch struct {
+	generation          uint64
+	opts                TranscodeOpts
+	outputDir           string
+	generationStartedAt time.Time
+	freshGuard          time.Duration
+	targetFloor         int
+	audio, beforeStart  bool
+}
+type segmentPruneResult struct {
+	floor      int
+	retryAfter time.Duration
+	removed    int
+	freedBytes int64
+	aborted    bool
+}
+
+func (batch segmentPruneBatch) candidates(fromSegment int) ([]segmentPruneCandidate, bool, error) {
+	if !batch.beforeStart {
+		return batch.sequentialCandidates(fromSegment)
+	}
+	entries, err := os.ReadDir(batch.outputDir)
+	if err != nil {
+		return nil, false, err
+	}
+	var candidates []segmentPruneCandidate
+	for _, entry := range entries {
+		segment, err := ParseSegmentNumber(entry.Name())
+		if entry.IsDir() || err != nil || segment >= batch.targetFloor || entry.Name() != pruneSegmentFilename(segment, batch.opts, batch.audio) {
+			continue
+		}
+		if len(candidates) == segmentPruneBatchSize {
+			return candidates, true, nil
+		}
+		candidates = append(candidates, segmentPruneCandidate{number: segment, path: filepath.Join(batch.outputDir, entry.Name())})
+	}
+	return candidates, false, nil
+}
+func (batch segmentPruneBatch) sequentialCandidates(fromSegment int) ([]segmentPruneCandidate, bool, error) {
+	var candidates []segmentPruneCandidate
+	toSegment := min(batch.targetFloor, fromSegment+segmentPruneBatchSize)
+	for segment := fromSegment; segment < toSegment; segment++ {
+		candidates = append(candidates, segmentPruneCandidate{number: segment, path: filepath.Join(batch.outputDir, pruneSegmentFilename(segment, batch.opts, batch.audio))})
+	}
+	return candidates, toSegment < batch.targetFloor, nil
+}
+func (s *TranscodeSession) pruneMediaSegmentBatch(batch segmentPruneBatch, candidates []segmentPruneCandidate) segmentPruneResult {
+	result := segmentPruneResult{}
+	processedFloor := batch.targetFloor
+	if !batch.beforeStart {
+		processedFloor = candidates[len(candidates)-1].number + 1
+	}
+	var retryAfter time.Duration
+	removed := 0
+	var freedBytes int64
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate.path)
+		if errors.Is(err, os.ErrNotExist) && !batch.audio && batch.opts.DV7ToDV81 {
+			rawPath := filepath.Join(batch.outputDir, dv7SourceDirectory, filepath.Base(candidate.path))
+			info, err = os.Stat(rawPath)
+			if err == nil {
+				candidate.path = rawPath
+			}
+		}
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if batch.beforeStart {
+				retryAfter = max(retryAfter, segmentPruneRetryDelay)
+			} else {
+				processedFloor, retryAfter = earlierPruneRetry(processedFloor, retryAfter, candidate.number, segmentPruneRetryDelay)
+			}
+			slog.Warn("stat downloaded transcode segment", "component", "playback", "error", err, "segment", candidate.number, "session", batch.opts.SessionID, "playback_session_id", batch.opts.SessionID)
+			continue
+		}
+		if batch.audio && !batch.generationStartedAt.IsZero() && info.ModTime().Before(batch.generationStartedAt) {
+			continue
+		}
+		freshUntil := info.ModTime().Add(batch.freshGuard)
+		if delay := time.Until(freshUntil); delay > 0 {
+			if batch.beforeStart {
+				retryAfter = max(retryAfter, delay)
+			} else {
+				processedFloor, retryAfter = earlierPruneRetry(processedFloor, retryAfter, candidate.number, delay)
+			}
+			continue
+		}
+
+		rawFreed, removeErr := s.removePruneCandidate(batch, candidate)
+		if errors.Is(removeErr, ErrSessionSuperseded) {
+			result.aborted = true
+			return result
+		}
+		if errors.Is(removeErr, os.ErrNotExist) {
+			continue
+		}
+		if removeErr != nil {
+			if batch.beforeStart {
+				retryAfter = max(retryAfter, segmentPruneRetryDelay)
+			} else {
+				processedFloor, retryAfter = earlierPruneRetry(processedFloor, retryAfter, candidate.number, segmentPruneRetryDelay)
+			}
+			slog.Warn("remove downloaded transcode segment", "component", "playback", "error", removeErr, "segment", candidate.number, "session", batch.opts.SessionID, "playback_session_id", batch.opts.SessionID)
+			continue
+		}
+		removed++
+		freedBytes += info.Size() + rawFreed
+	}
+
+	result.floor, result.retryAfter, result.removed, result.freedBytes = processedFloor, retryAfter, removed, freedBytes
+	return result
+}
+func (s *TranscodeSession) removePruneCandidate(batch segmentPruneBatch, candidate segmentPruneCandidate) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if batch.generation != s.segmentGeneration || s.restarting != nil {
+		if batch.generation == s.segmentGeneration {
+			*s.pruneFields(batch.audio).running = false
+		}
+		return 0, ErrSessionSuperseded
+	}
+	err := os.Remove(candidate.path)
+	if err != nil || batch.audio || !batch.opts.DV7ToDV81 || filepath.Dir(candidate.path) != batch.outputDir {
+		return 0, err
+	}
+	path := filepath.Join(batch.outputDir, dv7SourceDirectory, filepath.Base(candidate.path))
+	info, statErr := os.Stat(path)
+	removeErr := os.Remove(path)
+	var rawFreed int64
+	if removeErr == nil && statErr == nil {
+		rawFreed = info.Size()
+	}
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		err = removeErr
+	}
+	return rawFreed, err
+}
+
+func (s *TranscodeSession) prepareAudioRetentionIndex(index *copyManifestDurationIndex, opts TranscodeOpts) (bool, error) {
+	if index.loaded {
+		return true, nil
+	}
+	s.mu.Lock()
+	started := s.generationStartedAt
+	s.mu.Unlock()
+	timeline, info, err := s.audioTimelineSnapshot(s.outputDir)
+	if err != nil {
+		return false, err
+	}
+	if timeline.mediaSequence != opts.StartSegmentNumber || (!started.IsZero() && info.ModTime().Before(started)) {
+		return false, nil
+	}
+	return true, index.replace(timeline.entries)
 }
