@@ -228,13 +228,12 @@ func (s *TranscodeSession) audioSegmentNeedsRecovery(name string) bool {
 		return false
 	}
 	head := timeline.entries[len(timeline.entries)-1].number
-	headInfo, headErr := os.Stat(filepath.Join(dir, fmt.Sprintf("audio_%05d.ts", head)))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.segmentGeneration != generation || s.restarting != nil {
 		return false
 	}
-	// A later published file proves this cut has passed. At clean EOF the last
-	// cut is recoverable too; an unfinished or unknown timeline must keep waiting.
-	return (!s.running && s.waitErr == nil) || (number < head && headErr == nil && headInfo.Size() > 0)
+	// A published timeline proves this cut completed even after its file or
+	// the head file was pruned. Unpublished cuts must keep waiting.
+	return number <= head
 }

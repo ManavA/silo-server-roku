@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -498,5 +499,40 @@ func waitForAudioDemands(t *testing.T, s *TranscodeSession, want int) {
 		case <-deadline.C:
 			t.Fatal("audio request did not register its demand")
 		}
+	}
+}
+
+func TestSeparateAudioRecoveryUsesPublishedTimelineAfterPruning(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		number  int
+		running bool
+		failed  bool
+		stale   bool
+		start   int
+		want    bool
+	}{
+		{name: "published head", number: 2, running: true, want: true},
+		{name: "pruned head and earlier cut", number: 1, running: true, want: true},
+		{name: "not yet published", number: 3, running: true},
+		{name: "clean EOF published head", number: 2, want: true},
+		{name: "failed EOF unpublished cut", number: 3, failed: true},
+		{name: "stale timeline", number: 1, running: true, stale: true},
+		{name: "different start boundary", number: 1, running: true, start: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeRenditionTimeline(t, dir, "audio.m3u8", "audio_%05d.ts", 3, 2)
+			session := &TranscodeSession{outputDir: dir, running: tc.running, segmentGeneration: 1, opts: TranscodeOpts{SeparateAudioHLS: true, StartSegmentNumber: tc.start}}
+			if tc.failed {
+				session.waitErr = errors.New("producer failed")
+			}
+			if tc.stale {
+				session.generationStartedAt = time.Now().Add(time.Minute)
+			}
+			if got := session.audioSegmentNeedsRecovery(fmt.Sprintf("audio_%05d.ts", tc.number)); got != tc.want {
+				t.Fatalf("missing published audio recovery = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

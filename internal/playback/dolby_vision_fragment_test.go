@@ -320,3 +320,21 @@ func TestLiveDVConversionHonorsTranscodingToggle(t *testing.T) {
 		t.Fatalf("re-enabled converter calls: %q, %v", calls, err)
 	}
 }
+
+func TestDV7SessionWaitsForCapacityBeforeReadingSource(t *testing.T) {
+	for range cap(dvConversionSlots) {
+		dvConversionSlots <- struct{}{}
+	}
+	defer func() {
+		for range cap(dvConversionSlots) {
+			<-dvConversionSlots
+		}
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	// Missing source files must not be inspected while another session owns capacity.
+	session := &TranscodeSession{outputDir: t.TempDir(), dvContext: ctx, segmentGeneration: 1, opts: TranscodeOpts{DV7ToDV81: true}}
+	if _, err := session.GetSegment("seg_00000.m4s"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queued conversion = %v, want caller deadline", err)
+	}
+}
