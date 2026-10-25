@@ -92,6 +92,26 @@ func (s *TranscodeSession) convertDV7SegmentLocked(ctx context.Context, generati
 	if err := policy.check(); err != nil {
 		return err
 	}
+	conversionCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	select {
+	case dvConversionSlots <- struct{}{}:
+		defer func() { <-dvConversionSlots }()
+	case <-conversionCtx.Done():
+		return conversionCtx.Err()
+	}
+	if err := conversionCtx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	stale := generation != s.segmentGeneration || s.restarting != nil
+	s.mu.Unlock()
+	if stale {
+		return ErrSegmentNotFound
+	}
+	if err := policy.check(); err != nil {
+		return err
+	}
 	rawDir := filepath.Join(dir, dv7SourceDirectory)
 	init, err := readBoundedHLSFile(filepath.Join(rawDir, hlsInitFilename), 2<<20)
 	if err != nil {
@@ -109,9 +129,7 @@ func (s *TranscodeSession) convertDV7SegmentLocked(ctx context.Context, generati
 	if err != nil {
 		return ErrSegmentNotFound
 	}
-	conversionCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	convertedInit, convertedData, err := convertDV7FragmentWithPolicy(conversionCtx, tool, init, data, policy)
+	convertedInit, convertedData, err := convertDV7FragmentWithSlot(conversionCtx, tool, init, data, policy)
 	if err != nil {
 		return err
 	}

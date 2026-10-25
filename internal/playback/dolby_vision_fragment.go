@@ -42,6 +42,11 @@ func convertDV7FragmentWithPolicy(ctx context.Context, toolPath string, initData
 	case <-ctx.Done():
 		return nil, nil, ctx.Err()
 	}
+	return convertDV7FragmentWithSlot(ctx, toolPath, initData, fragmentData, policy)
+}
+
+// The caller holds dvConversionSlots for the lifetime of the source buffers.
+func convertDV7FragmentWithSlot(ctx context.Context, toolPath string, initData, fragmentData []byte, policy *TranscodePolicy) ([]byte, []byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
