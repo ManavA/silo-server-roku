@@ -87,15 +87,36 @@ const (
 	FeatureSubripSidecarV3    = "subrip_sidecar_v1"
 	// FeatureHLSSubtitleRenditionsV3 is the client's statement that it plays
 	// a subtitle carried as a WebVTT SUBTITLES rendition of the plan's HLS
-	// stream (subtitle.hls_rendition) instead of a sidecar artifact. Only a
-	// server_transcode_hls plan uses it, for an embedded text track. It
-	// exists only on /api/v2 (see NativeServerFeaturesV3).
+	// stream (subtitle.hls_rendition) instead of a sidecar artifact. A
+	// server_transcode_hls plan uses it for an embedded text track, and a
+	// server_remux_hls plan too when the client also lists
+	// FeatureHLSRemuxSubtitleRenditionsV3. It exists only on /api/v2 (see
+	// NativeServerFeaturesV3).
 	FeatureHLSSubtitleRenditionsV3 = "hls_subtitle_renditions_v1"
+	// FeatureHLSRemuxSubtitleRenditionsV3 extends FeatureHLSSubtitleRenditionsV3,
+	// which it requires, to HLS copy remuxes: an opted-in client receives a
+	// server_remux_hls plan's embedded text track as subtitle.hls_rendition,
+	// on a subtitle playlist that follows the remux's keyframe-cut segments
+	// (a VOD keyframe plan or FFmpeg's EVENT playlist). Without it a remux
+	// keeps its sidecar. It exists only on /api/v2 (see NativeServerFeaturesV3).
+	FeatureHLSRemuxSubtitleRenditionsV3 = "hls_remux_subtitle_renditions_v1"
 	// FeaturePlanActiveQualityV3 tells a client the plan names the
 	// available_qualities entry it delivers in active_quality, so an absent
 	// active_quality means "no entry" rather than "a server that predates
 	// the field". It exists only on /api/v2 (see NativeServerFeaturesV3).
 	FeaturePlanActiveQualityV3 = "plan_active_quality_v1"
+	// FeatureHLSCopyMPEGTSV3 is an hls delivery feature: a client lists it in
+	// deliveries.hls.features to have HLS copy remuxes of H.264 or HEVC video
+	// packaged as MPEG-TS segments instead of fragmented MP4. Players such as
+	// Roku's play the audio of a muxed fMP4 copy silently but play the same
+	// remux in MPEG-TS. The plan records the choice in
+	// effective_recipe.segment_container, which is part of its identity.
+	// Encoded video keeps its packaging. It exists only on /api/v2 (see
+	// NativeServerFeaturesV3).
+	FeatureHLSCopyMPEGTSV3 = "hls_copy_mpegts_v1"
+	// SegmentContainerMPEGTSV3 is effective_recipe.segment_container for an
+	// HLS plan packaged as MPEG-TS because the client asked for it.
+	SegmentContainerMPEGTSV3 = "mpegts"
 	// FailureSubtitleHLSRenditionFailedV3 is the failure_recovery
 	// classification a client sends when the plan's subtitle rendition never
 	// became selectable in its player. The server stops offering renditions
@@ -132,6 +153,16 @@ const (
 	DeviceQuirkRegistryRevisionV3     = "2026-07-13.1"
 )
 
+// FeatureHLSVariableSubstitutionV3 is an hls delivery feature: the client
+// resolves EXT-X-DEFINE variables in media playlists, so a playlist the
+// server rewrites (FFmpeg's real copy playlist, a transcode node's
+// playlist relayed by the API) may carry a credential-sized query once
+// instead of on every segment URI. Long titles otherwise exceed the 4 MiB
+// some players accept. The playlists the server builds itself use the
+// substitution for every client regardless. /api/v2 advertises it in the
+// capabilities features list.
+const FeatureHLSVariableSubstitutionV3 = "hls_variable_substitution_v1"
+
 // Worker transport features are protocol capabilities rather than media
 // transformations. They let route planning exclude an older worker before a
 // client is handed a URL that worker cannot serve.
@@ -155,7 +186,21 @@ const (
 	// A transcode node that emits and serves an HLS WebVTT subtitle rendition
 	// (TranscodeOpts.SubtitleRendition).
 	TransportFeatureHLSSubtitleRenditionV1 = "hls_subtitle_rendition_v1"
+	// A transcode node that also emits the rendition for an HLS copy remux,
+	// whose subtitle playlist follows the keyframe plan or FFmpeg's EVENT
+	// playlist. Nodes with only hls_subtitle_rendition_v1 refuse it.
+	TransportFeatureHLSRemuxSubtitleRenditionV1 = "hls_remux_subtitle_rendition_v1"
 )
+
+// HLSSubtitleRenditionTransportFeatureV3 is the transport feature a node must
+// advertise to emit the subtitle rendition of a stream whose video target is
+// targetVideoCodec.
+func HLSSubtitleRenditionTransportFeatureV3(targetVideoCodec string) string {
+	if strings.EqualFold(strings.TrimSpace(targetVideoCodec), codecCopyV3) {
+		return TransportFeatureHLSRemuxSubtitleRenditionV1
+	}
+	return TransportFeatureHLSSubtitleRenditionV1
+}
 
 // Degradation warning codes reported by playback plans.
 const (
@@ -223,7 +268,13 @@ func ServerFeaturesV3() []string {
 // advertises and honors only on /api/v2. They postdate the /api/v1 freeze, so
 // the frozen surface neither advertises nor negotiates them.
 func NativeServerFeaturesV3() []string {
-	return append(ServerFeaturesV3(), FeatureBufferingQualityV1, FeaturePlaybackPlanSummaryV1, FeatureSubripSidecarV3, FeatureMarkerThumbnailsV3, FeatureHLSSubtitleRenditionsV3, FeaturePlanActiveQualityV3)
+	return append(ServerFeaturesV3(), FeatureBufferingQualityV1, FeaturePlaybackPlanSummaryV1, FeatureSubripSidecarV3, FeatureMarkerThumbnailsV3, FeatureHLSSubtitleRenditionsV3, FeaturePlanActiveQualityV3, FeatureHLSRemuxSubtitleRenditionsV3, FeatureHLSCopyMPEGTSV3, FeatureHLSVariableSubstitutionV3)
+}
+
+// HLSVariableSubstitutionV3 reports whether the request's hls delivery
+// listed hls_variable_substitution_v1.
+func HLSVariableSubstitutionV3(request StartRequestV3) bool {
+	return deliverySupportsFeatureV3(request, DeliveryClassHLSV3, FeatureHLSVariableSubstitutionV3)
 }
 
 // WithoutFeatureV3 returns features with every spelling of feature removed.
@@ -839,8 +890,13 @@ type TimelineV3 struct {
 }
 
 type EffectiveRecipeV3 struct {
-	VideoCodec       string   `json:"video_codec,omitempty"`
-	VideoSampleEntry string   `json:"video_sample_entry,omitempty"`
+	VideoCodec       string `json:"video_codec,omitempty"`
+	VideoSampleEntry string `json:"video_sample_entry,omitempty"`
+	// SegmentContainer is "mpegts" on an HLS copy remux packaged as MPEG-TS
+	// because the client's hls delivery listed hls_copy_mpegts_v1. Such a
+	// plan has no video_sample_entry, which only fragmented MP4 carries.
+	// Absent means the server's default packaging.
+	SegmentContainer string   `json:"segment_container,omitempty"`
 	AudioCodec       string   `json:"audio_codec,omitempty"`
 	Width            *int     `json:"width,omitempty"`
 	Height           *int     `json:"height,omitempty"`
@@ -1546,12 +1602,13 @@ func HasFeatureV3(features []string, wanted string) bool {
 //     seek reanchor must reproduce the frozen plan's artifact exactly.
 //   - hls_subtitle_renditions_v1 decides whether the transcode's stream URL
 //     is a multivariant playlist carrying the subtitle or a media playlist
-//     beside a sidecar. A reused HLS transport keeps the shape it was built
-//     with, so the attempt has to keep the same answer.
+//     beside a sidecar, and hls_remux_subtitle_renditions_v1 the same for a
+//     copy remux. A reused HLS transport keeps the shape it was built with,
+//     so the attempt has to keep the same answer.
 //
 // Stop/start is the explicit boundary for changing any of them.
 func AttemptStickyFeaturesV3() []string {
-	return []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3, FeatureSoftwareVideoDecodeV3, FeatureSubripSidecarV3, FeatureMarkerThumbnailsV3, FeatureHLSSubtitleRenditionsV3}
+	return []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3, FeatureSoftwareVideoDecodeV3, FeatureSubripSidecarV3, FeatureMarkerThumbnailsV3, FeatureHLSSubtitleRenditionsV3, FeatureHLSRemuxSubtitleRenditionsV3}
 }
 
 // PinAttemptStickyFeaturesV3 returns requested with every attempt-sticky
@@ -1575,6 +1632,43 @@ func PinAttemptStickyFeaturesV3(requested, negotiated []string) []string {
 		}
 	}
 	return pinned
+}
+
+// PinHLSVariableSubstitutionV3 forces hls_variable_substitution_v1 in
+// requested's hls delivery back to the state the start negotiated. Like the
+// attempt-sticky client features, the playlist form is fixed at start: a
+// reused HLS transport keeps serving the form its session was built with, so
+// a replan must not record or plan a different one. Stop/start is the
+// boundary for changing it.
+//
+// The decision is the feature's presence in the hls delivery's list,
+// whether or not that delivery is currently enabled, because a replan's
+// context replaces the durable request's. A replan that omits the hls
+// delivery keeps the opt-in on a disabled placeholder entry, which plans
+// exactly like an absent one, so a later replan that brings HLS back still
+// gets the form the attempt started with.
+func PinHLSVariableSubstitutionV3(requested *ClientPlaybackContextV3, negotiated StartRequestV3) {
+	pinned := HasFeatureV3(negotiated.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3].Features, FeatureHLSVariableSubstitutionV3)
+	delivery, ok := requested.Deliveries[DeliveryClassHLSV3]
+	if !ok && !pinned {
+		return
+	}
+	if !ok {
+		// The placeholder is persisted, and the schema requires these lists
+		// to be arrays, never null.
+		delivery = DeliveryCapabilityV3{
+			Containers: []string{}, VideoCodecs: []string{}, AudioDecodeCodecs: []string{},
+			AudioPassthroughCodecs: []string{}, ValidatedClaims: []string{}, Transformations: []TransformationV3{},
+		}
+	}
+	delivery.Features = WithoutFeatureV3(delivery.Features, FeatureHLSVariableSubstitutionV3)
+	if pinned {
+		delivery.Features = append(delivery.Features, FeatureHLSVariableSubstitutionV3)
+	}
+	if requested.Deliveries == nil {
+		requested.Deliveries = map[string]DeliveryCapabilityV3{}
+	}
+	requested.Deliveries[DeliveryClassHLSV3] = delivery
 }
 
 func NewTerminalResponseV3(reason, message string, retryable bool) DecisionResponseV3 {

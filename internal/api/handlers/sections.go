@@ -813,6 +813,15 @@ func (h *SectionHandler) listProfileOverrides(ctx context.Context, q SectionOver
 	if overrides == nil {
 		overrides = []userstore.SectionOverride{}
 	}
+	// A row saved before the item_limit cap may hold a larger value. Report
+	// it capped, as the resolver applies it, so a client that sends back
+	// what it read is not refused by saveProfileOverrides.
+	for i := range overrides {
+		if limit := overrides[i].ItemLimit; limit != nil && *limit > sections.MaxItemLimit {
+			capped := sections.MaxItemLimit
+			overrides[i].ItemLimit = &capped
+		}
+	}
 	return overrides, nil
 }
 
@@ -929,6 +938,11 @@ func (h *SectionHandler) saveProfileOverrides(ctx context.Context, q SectionOver
 				return apiError(http.StatusBadRequest, "duplicate_override", "section override IDs must be unique")
 			}
 			seenIDs[o.ID] = struct{}{}
+		}
+		// The fetchers size their buffers from item_limit, so an unbounded
+		// value lets one profile exhaust server memory on every home load.
+		if o.ItemLimit != nil && *o.ItemLimit > sections.MaxItemLimit {
+			return apiError(http.StatusBadRequest, "invalid_item_limit", fmt.Sprintf("item_limit must be at most %d", sections.MaxItemLimit))
 		}
 		// SectionID is the authoritative shape discriminator used by the resolver
 		// and scheduled-demand scan. Canonicalize IsUserAdded to match it so a
