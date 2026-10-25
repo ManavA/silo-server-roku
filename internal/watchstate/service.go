@@ -14,6 +14,10 @@ import (
 type LeafWatchTarget struct {
 	MediaItemID     string
 	DurationSeconds float64
+	// RecordRewatch lets a completed target with a resume position (a rewatch
+	// in progress) record another play and clear the position. Without it that
+	// target is a no-op like any completed one.
+	RecordRewatch bool
 }
 
 type Service struct {
@@ -428,8 +432,10 @@ func (s *Service) recordMarkWatched(
 	// A mark is idempotent per leaf: a target the profile has already
 	// completed gets no new history row and no new outbound play, so a
 	// retried request (or a series mark over partly watched episodes)
-	// records each play once. An unmark clears the completed state, so the
-	// next mark records again.
+	// records each play once. The exception is a RecordRewatch target with a
+	// resume position: it records another play and clears the position, so a
+	// repeat records again only if playback set a new position in between.
+	// An unmark clears the completed state, so the next mark records again.
 	targets, err = s.dropCompletedTargets(ctx, store, profileID, targets)
 	if err != nil {
 		return ManualMarkResult{}, err
@@ -451,6 +457,7 @@ func (s *Service) recordMarkWatched(
 		batchTargets = append(batchTargets, userstore.MarkWatchedTarget{
 			MediaItemID:     target.MediaItemID,
 			DurationSeconds: target.DurationSeconds,
+			RecordRewatch:   target.RecordRewatch,
 		})
 		entries = append(entries, userstore.WatchHistoryEntry{
 			ID:              uuid.NewString(),
@@ -480,8 +487,9 @@ func (s *Service) recordMarkWatched(
 }
 
 // dropCompletedTargets returns the targets the profile has not yet completed,
-// in their original order. The progress lookup honors the watched-state
-// cutoff, so an unmarked item counts as not completed.
+// and the RecordRewatch targets it is rewatching (completed with a resume
+// position), in their original order. The progress lookup honors the
+// watched-state cutoff, so an unmarked item counts as not completed.
 func (s *Service) dropCompletedTargets(ctx context.Context, store userstore.UserStore, profileID string, targets []LeafWatchTarget) ([]LeafWatchTarget, error) {
 	if len(targets) == 0 {
 		return targets, nil
@@ -496,7 +504,7 @@ func (s *Service) dropCompletedTargets(ctx context.Context, store userstore.User
 	}
 	remaining := make([]LeafWatchTarget, 0, len(targets))
 	for _, target := range targets {
-		if current, ok := progress[target.MediaItemID]; ok && current.Completed {
+		if current, ok := progress[target.MediaItemID]; ok && current.Completed && !(target.RecordRewatch && current.PositionSeconds > 0) {
 			continue
 		}
 		remaining = append(remaining, target)
@@ -613,7 +621,9 @@ func formatWatchedAt(watchedAt time.Time) string {
 }
 
 // RecordJellycompatProgress commits the leaf's explicit state and its optional
-// played/unplayed history mutation before notifying watch providers.
+// played/unplayed history mutation before notifying watch providers. Like the
+// mark-played path, a played mark adds history only when the leaf is not
+// already completed.
 func (s *Service) RecordJellycompatProgress(ctx context.Context, userID int, profileID string, edit userstore.JellycompatProgressEdit, played *bool) error {
 	if edit.EventAt.IsZero() {
 		edit.EventAt = time.Now().UTC()
