@@ -31,6 +31,10 @@ func init() {
 	// Register .m4s so http.ServeFile sets the correct Content-Type for
 	// fMP4 HLS segments. Go's default MIME database does not include it.
 	_ = mime.AddExtensionType(".m4s", "video/mp4")
+	// Pin .ts for MPEG-TS HLS segments: the system database Go reads first
+	// (shared-mime-info, as in the server image) lists .ts as Qt Linguist
+	// text before video/mp2t.
+	_ = mime.AddExtensionType(".ts", mimeVideoMPEGTS)
 }
 
 // TranscodeOpts holds configuration for an HLS transcode session.
@@ -60,6 +64,9 @@ type TranscodeOpts struct {
 	SourceVideoBitDepth  int
 	VideoBitstreamFilter string // validated copy-mode BSF: DV7ToHDR10BitstreamFilter
 	VideoSampleEntry     string // allowlisted copy-HLS sample entry: dvh1 or hvc1
+	// VideoRange is the HLS VIDEO-RANGE a copy remux's subtitle rendition
+	// variant names (CopyHLSVideoRange): "", PQ, or HLG.
+	VideoRange string
 	// CopyVideoMPEGTS packages copied video in MPEG-TS instead of fMP4. It is
 	// durable because the segment extension and bytes must survive restarts.
 	CopyVideoMPEGTS              bool
@@ -151,8 +158,8 @@ type TranscodeOpts struct {
 	SubtitleCodec string
 	// SubtitleRendition emits the selected embedded text track
 	// (SubtitleTrackIndex, never burned in) from this same ffmpeg process as
-	// the WebVTT subtitle rendition of the synthetic HLS playlist. See
-	// subtitle_rendition.go.
+	// the WebVTT subtitle rendition of its HLS playlist, for a transcode or
+	// an HLS copy remux. See subtitle_rendition.go.
 	SubtitleRendition bool
 	// subtitleCueFile is the per-generation cue file the rendition output
 	// writes. Process-local: every start and restart derives its own.
@@ -182,6 +189,12 @@ type TranscodeOpts struct {
 	NodeType        string
 	ExecutionMode   string
 	FFmpegLogSink   FFmpegLogSink
+
+	// HLSVariableSubstitution is the client's hls_variable_substitution_v1
+	// delivery feature: FFmpeg's real playlist carries a credential-sized
+	// query once through EXT-X-DEFINE instead of on every segment URI. It
+	// changes playlist text only, never media bytes.
+	HLSVariableSubstitution bool
 	// PrepareProgressSink receives PrepareFile's live encode progress. Like
 	// the log sink it is process-local and never frozen into a recipe.
 	PrepareProgressSink PrepareProgressSink
@@ -388,16 +401,6 @@ const DefaultSegmentDuration = defaultSegmentDuration
 // 100,000-second limit; shorter fragments reach the same bound sooner.
 const maxSyntheticManifestSegments = 50_000
 
-// Large synthetic playlists used to repeat the full access and reconstruction
-// query on every segment URI. For a feature-length title that turns a small
-// index into several megabytes of duplicate JWT text, delaying both transfer
-// and hls.js parsing. HLS variable substitution keeps the query once while
-// preserving the exact resolved segment URLs. Keep small playlists on the
-// simpler legacy form; below this byte threshold the saving is immaterial.
-const minManifestQuerySubstitutionSavings = 64 * 1024
-
-const manifestQueryVariable = "silo_query"
-
 // remountStartOffsetSeconds is a positive, effectively-zero HLS start offset.
 // Media3 suppresses live-edge position projection for EVENT playlists only
 // when EXT-X-START is positive. Anchoring one millisecond after the generation
@@ -435,6 +438,9 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 		opts.VideoSampleEntry != "" && !strings.EqualFold(opts.TargetCodecVideo, "copy") &&
 			(opts.VideoSampleEntry != VideoSampleEntryHVC1 || !strings.EqualFold(opts.TargetCodecVideo, transcodeCodecHEVC)) {
 		return nil, fmt.Errorf("unsupported video sample-entry recipe")
+	}
+	if !validCopyHLSVideoRange(opts) {
+		return nil, errors.New("unsupported HLS video range")
 	}
 	if opts.CopyVideoMPEGTS && !strings.EqualFold(opts.TargetCodecVideo, "copy") {
 		return nil, fmt.Errorf("copy-video MPEG-TS requires video copy")
@@ -516,7 +522,7 @@ func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession,
 	var subtitleSpans []subtitleCueSpan
 	var subtitleCueBase uint64
 	if subtitleRenditionActive(opts) {
-		subtitleSpans, subtitleCueBase = loadSubtitleSpans(opts)
+		subtitleSpans, subtitleCueBase = loadSubtitleSpans(opts, copyPlan)
 		opts.subtitleCueFile = subtitleCueFileName(subtitleCueBase)
 	}
 	s := &TranscodeSession{
@@ -2348,21 +2354,30 @@ func (s *TranscodeSession) waitForManifest(ctx context.Context, timeout time.Dur
 
 // BuildPlaybackManifest returns the manifest we should expose to clients.
 //
-// Copy-video sessions always expose FFmpeg's real manifest so the playlist
-// timing matches the variable-length fragments FFmpeg actually writes and the
-// seekable window reflects what FFmpeg has produced so far. Encoded transcodes
+// Copy-video sessions expose their keyframe plan or FFmpeg's real manifest, so
+// the playlist timing matches the variable-length fragments FFmpeg actually
+// writes and, without a plan, the seekable window reflects what FFmpeg has
+// produced so far. Encoded transcodes
 // use the synthetic full VOD manifest only while its segment count is bounded;
 // longer media uses FFmpeg's real sliding playlist.
+//
+// A session with a subtitle rendition answers its multivariant playlist, or
+// the media playlist rawQuery selects (see buildSubtitleRenditionPlaylist).
 func (s *TranscodeSession) BuildPlaybackManifest(segPrefix, rawQuery string) ([]byte, error) {
+	if s.HasSubtitleRendition() {
+		return s.buildSubtitleRenditionPlaylist(segPrefix, rawQuery)
+	}
+	return s.buildVideoPlaylist(segPrefix, rawQuery)
+}
+
+// buildVideoPlaylist is the session's video media playlist.
+func (s *TranscodeSession) buildVideoPlaylist(segPrefix, rawQuery string) ([]byte, error) {
 	opts := s.Opts()
 	if opts.SeparateAudioHLS {
 		return s.buildSeparateAudioManifest(segPrefix, rawQuery)
 	}
 	if s.copyPlan != nil {
 		return s.copyPlan.manifest(opts, segPrefix, rawQuery), nil
-	}
-	if s.HasSubtitleRendition() {
-		return s.buildSubtitleRenditionPlaylist(segPrefix, rawQuery), nil
 	}
 	if strings.EqualFold(opts.TargetCodecVideo, "copy") ||
 		!CanGenerateSyntheticManifest(opts.TotalDuration, opts.SegmentDuration) {
@@ -2373,6 +2388,9 @@ func (s *TranscodeSession) BuildPlaybackManifest(segPrefix, rawQuery string) ([]
 			return nil, err
 		}
 		manifest = stabilizeCopyHLSRemountTimeline(manifest, opts)
+		if opts.HLSVariableSubstitution {
+			return RewriteManifestPathsWithSubstitution(manifest, segPrefix, rawQuery)
+		}
 		return RewriteManifestPaths(manifest, segPrefix, rawQuery)
 	}
 
@@ -2467,7 +2485,12 @@ func (s *TranscodeSession) BuildSourceAlignedPlaybackManifest(segPrefix, rawQuer
 
 	gapURI := segPrefix + "source_timeline_gap" + hlsSegmentExtension(opts)
 	if rawQuery != "" {
-		gapURI += "?" + rawQuery
+		// Gap URIs take the query form the real segment URIs got.
+		gapQuery := rawQuery
+		if definition, reference := manifestVariable(manifestQueryVariable, rawQuery, minRewrittenURISavings); definition != "" && bytes.Contains(manifest, []byte(definition)) {
+			gapQuery = reference
+		}
+		gapURI += "?" + gapQuery
 	}
 	if strings.EqualFold(opts.TargetCodecVideo, "copy") && opts.CopySeekAnchorResolved {
 		timeline, err := parseManifestTimeline(manifest)
@@ -3064,22 +3087,11 @@ func (s *TranscodeSession) generateSyntheticPlaylist(segPrefix, rawQuery, namePr
 	return buf.Bytes()
 }
 
-func syntheticManifestQuery(segmentCount int, rawQuery string) (definition, suffix string, minVersion int) {
-	if rawQuery == "" {
-		return "", "", 0
-	}
-	legacySuffix := "?" + rawQuery
-	variableSuffix := "?{$" + manifestQueryVariable + "}"
-	savingsPerSegment := len(legacySuffix) - len(variableSuffix)
-	if savingsPerSegment <= 0 || int64(segmentCount)*int64(savingsPerSegment) < minManifestQuerySubstitutionSavings || strings.ContainsAny(rawQuery, "\"\r\n") {
-		return "", legacySuffix, 0
-	}
-	definition = fmt.Sprintf("#EXT-X-DEFINE:NAME=\"%s\",VALUE=\"%s\"\n", manifestQueryVariable, rawQuery)
-	return definition, variableSuffix, 8
-}
-
 // GetSegment returns the file path of a named segment if it exists.
 func (s *TranscodeSession) GetSegment(name string) (string, error) {
+	if !servableSegmentName(name) {
+		return "", ErrSegmentNotFound
+	}
 	if err := s.ensureDV7Segment(name); err != nil {
 		return "", err
 	}
@@ -3120,7 +3132,15 @@ func (l *SegmentLease) Close() error {
 
 // OpenSegment opens a completed segment for serving and captures its FFmpeg
 // generation atomically with the open.
+//
+// name must be a single file name inside the output directory. The open goes
+// through os.Root, so a symlink in the directory cannot lead outside it: the
+// subtitle filter alias points at the source media and must never be served as
+// a segment.
 func (s *TranscodeSession) OpenSegment(name string) (*SegmentLease, error) {
+	if !servableSegmentName(name) {
+		return nil, ErrSegmentNotFound
+	}
 	if err := s.ensureDV7Segment(name); err != nil {
 		return nil, err
 	}
@@ -3130,8 +3150,17 @@ func (s *TranscodeSession) OpenSegment(name string) (*SegmentLease, error) {
 		return nil, ErrSegmentNotFound
 	}
 
-	clean := filepath.Base(name)
-	segment, err := os.Open(filepath.Join(s.outputDir, clean))
+	root, err := os.OpenRoot(s.outputDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrSegmentNotFound
+		}
+		return nil, fmt.Errorf("open segment directory: %w", err)
+	}
+	// Files opened through a Root hold their own descriptor and stay valid
+	// after the Root closes.
+	defer func() { _ = root.Close() }()
+	segment, err := root.Open(name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrSegmentNotFound
@@ -3143,7 +3172,7 @@ func (s *TranscodeSession) OpenSegment(name string) (*SegmentLease, error) {
 		_ = segment.Close()
 		return nil, fmt.Errorf("stat segment: %w", err)
 	}
-	if info.Size() <= 0 {
+	if !info.Mode().IsRegular() || info.Size() <= 0 {
 		_ = segment.Close()
 		return nil, ErrSegmentNotFound
 	}
@@ -3156,6 +3185,14 @@ func (s *TranscodeSession) OpenSegment(name string) (*SegmentLease, error) {
 		Generation:      s.segmentGeneration,
 		GenerationToken: s.segmentGenerationTokenLocked(),
 	}, nil
+}
+
+// servableSegmentName reports whether name is a plain file name the segment
+// route may open: local, a single path element, and not the subtitle filter
+// alias.
+func servableSegmentName(name string) bool {
+	return filepath.IsLocal(name) && filepath.Base(name) == name && name != "." &&
+		name != subtitleFilterAliasName
 }
 
 // Close terminates the ffmpeg process and removes the temporary output directory.
@@ -3739,16 +3776,36 @@ func (s *TranscodeSession) WaitForOpenSegment(name string, timeout time.Duration
 // string. This ensures the HLS player's segment requests match server routes
 // and preserve any auth or cache-busting parameters from the manifest URL.
 func RewriteManifestPaths(manifest []byte, segPrefix, rawQuery string) ([]byte, error) {
+	return rewriteManifestPaths(manifest, segPrefix, rawQuery, false)
+}
+
+// RewriteManifestPathsWithSubstitution is RewriteManifestPaths for a session
+// whose client negotiated hls_variable_substitution_v1: a credential-sized
+// query (see minRewrittenURISavings) is carried once through variable
+// substitution.
+func RewriteManifestPathsWithSubstitution(manifest []byte, segPrefix, rawQuery string) ([]byte, error) {
+	return rewriteManifestPaths(manifest, segPrefix, rawQuery, true)
+}
+
+func rewriteManifestPaths(manifest []byte, segPrefix, rawQuery string, substitute bool) ([]byte, error) {
 	if err := validateManifestHeader(manifest); err != nil {
 		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
 
-	var suffix string
+	lines := bytes.Split(manifest, []byte("\n"))
+	var suffix, definition string
 	if rawQuery != "" {
 		suffix = "?" + rawQuery
 	}
+	// Never define a variable beside the input's own definitions.
+	if substitute && rawQuery != "" && !bytes.Contains(manifest, []byte("#EXT-X-DEFINE:")) {
+		var reference string
+		definition, reference = manifestVariable(manifestQueryVariable, rawQuery, minRewrittenURISavings)
+		if definition != "" {
+			suffix = "?" + reference
+		}
+	}
 
-	lines := bytes.Split(manifest, []byte("\n"))
 	for i, line := range lines {
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 {
@@ -3772,6 +3829,9 @@ func RewriteManifestPaths(manifest []byte, segPrefix, rawQuery string) ([]byte, 
 
 		// Segment filename line.
 		lines[i] = []byte(segPrefix + string(trimmed) + suffix)
+	}
+	if definition != "" {
+		lines = insertManifestDefinition(lines, definition)
 	}
 	return bytes.Join(lines, []byte("\n")), nil
 }
@@ -3813,11 +3873,34 @@ func rewriteMapURI(line []byte, segPrefix, suffix string) ([]byte, error) {
 // restart cannot reconstruct the session. Re-injecting the client-facing token
 // here keeps reconstruction working without ever exposing it to the node.
 func AppendManifestQueryParam(manifest []byte, key, value string) []byte {
+	return appendManifestQueryParam(manifest, key, value, false)
+}
+
+// AppendManifestQueryParamWithSubstitution is AppendManifestQueryParam for a
+// session whose client negotiated hls_variable_substitution_v1: in a media
+// playlist the value is carried once through variable substitution (a
+// "silo_<key>" EXT-X-DEFINE) under the same rule as
+// RewriteManifestPathsWithSubstitution. A multivariant playlist keeps the
+// literal value.
+func AppendManifestQueryParamWithSubstitution(manifest []byte, key, value string) []byte {
+	return appendManifestQueryParam(manifest, key, value, true)
+}
+
+func appendManifestQueryParam(manifest []byte, key, value string, substitute bool) []byte {
 	if key == "" || validateManifestHeader(manifest) != nil {
 		return manifest
 	}
 	param := key + "=" + value
 	lines := bytes.Split(manifest, []byte("\n"))
+	var definition string
+	name := manifestParamVariablePrefix + key
+	if substitute && isManifestVariableName(name) && isMediaPlaylist(lines) && !bytes.Contains(manifest, []byte(`NAME="`+name+`"`)) {
+		var reference string
+		definition, reference = manifestVariable(name, value, minRewrittenURISavings)
+		if definition != "" {
+			param = key + "=" + reference
+		}
+	}
 	for i, line := range lines {
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 {
@@ -3833,6 +3916,9 @@ func AppendManifestQueryParam(manifest []byte, key, value string) []byte {
 			continue
 		}
 		lines[i] = appendURIQueryParam(trimmed, param)
+	}
+	if definition != "" {
+		lines = insertManifestDefinition(lines, definition)
 	}
 	return bytes.Join(lines, []byte("\n"))
 }

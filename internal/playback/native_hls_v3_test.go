@@ -5,38 +5,8 @@ import (
 	"testing"
 )
 
-func TestPlanPlaybackV3NativeMPEGTS(t *testing.T) {
-	file := detailedFixtureFileV3()
-	req := nativeMPEGTSRequestV3()
-	input := PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: NewTransformationRegistryV3([]TransformationSpecV3{{Name: "hls_mpegts", RecipeVersion: "1", Available: true}})}
-	result := PlanPlaybackV3(input)
-	if result.Plan == nil {
-		t.Fatalf("result = %s", ExplainPlannerResultV3(result))
-	}
-	found := false
-	for _, transform := range result.Plan.Transformations {
-		if transform.Name == "hls_mpegts" && transform.RecipeVersion == "1" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("native MPEG-TS recipe missing: %+v", result.Plan.Transformations)
-	}
-}
-
-func TestPlanPlaybackV3NativeMPEGTSRequiresExecutor(t *testing.T) {
-	file := detailedFixtureFileV3()
-	req := nativeMPEGTSRequestV3()
-	input := PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Settings: PlannerSettingsV3{TranscodeEnabled: true, Allow4KTranscode: true}, Registry: NewTransformationRegistryV3(nil)}
-	result := PlanPlaybackV3(input)
-	if result.Plan != nil {
-		t.Fatalf("unavailable native packaging returned a plan: %+v", result.Plan)
-	}
-}
-
-func nativeMPEGTSRequestV3() StartRequestV3 {
+func canonicalHLSCopyRequestV3() StartRequestV3 {
 	req := validStartRequestV3()
-	req.ClientFeatures = append(req.ClientFeatures, "native_hls_mpegts_v1")
 	req.Capabilities.VideoEvidence = EvidenceDeclaredV3
 	req.Capabilities.AudioEvidence = EvidenceDeclaredV3
 	req.Capabilities.HDRDetails = &HDRCapabilitiesV3{HDR10: true}
@@ -47,26 +17,34 @@ func nativeMPEGTSRequestV3() StartRequestV3 {
 	hls.VideoCodecs = []string{"hevc"}
 	hls.AudioDecodeCodecs = []string{"aac"}
 	hls.HDRDetails = req.Capabilities.HDRDetails
-	hls.Features = append(hls.Features, "native_hls_mpegts_v1")
+	hls.Features = append(hls.Features, FeatureHLSCopyMPEGTSV3)
 	req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = hls
 	return req
 }
 
-func TestPlanPlaybackV3NativeMPEGTSPreservesLegacyRoute(t *testing.T) {
-	file := detailedFixtureFileV3()
-	req := nativeMPEGTSRequestV3()
-	hls := req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3]
-	hls.Features = nil
-	req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = hls
-	result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Registry: NewTransformationRegistryV3(nil)})
-	if result.Plan == nil || len(result.Plan.Transformations) != 0 {
-		t.Fatalf("legacy route changed: %s", ExplainPlannerResultV3(result))
+func TestPlanPlaybackV3UnnegotiatedHLSPreservesDefaultPackaging(t *testing.T) {
+	for _, feature := range []string{"", "native_hls_mpegts_v1", FeatureHLSCopyMPEGTSV3} {
+		t.Run(feature, func(t *testing.T) {
+			file := detailedFixtureFileV3()
+			req := canonicalHLSCopyRequestV3()
+			req.ClientFeatures = append(req.ClientFeatures, feature)
+			hls := req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3]
+			hls.Features = nil
+			if feature == "native_hls_mpegts_v1" {
+				hls.Features = []string{feature}
+			}
+			req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = hls
+			result := PlanPlaybackV3(PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Registry: NewTransformationRegistryV3(nil)})
+			if result.Plan == nil || len(result.Plan.Transformations) != 0 || result.Plan.EffectiveRecipe.SegmentContainer != "" {
+				t.Fatalf("unnegotiated packaging changed: %s", ExplainPlannerResultV3(result))
+			}
+		})
 	}
 }
 
 func TestPlanPlaybackV3SeparateAudioHLS(t *testing.T) {
 	file := detailedFixtureFileV3()
-	req := nativeMPEGTSRequestV3()
+	req := canonicalHLSCopyRequestV3()
 	req.ClientFeatures = []string{"native_hls_separate_audio_v1"}
 	hls := req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3]
 	hls.Features = []string{"native_hls_playback_v1", "native_hls_separate_audio_v1"}
@@ -97,7 +75,7 @@ func TestNativeHLSMasterDescribesEffectiveDVAndAudio(t *testing.T) {
 func serverDV81PlannerInputV3() PlannerInputV3 {
 	file := unstrippableProfile7FixtureV3()
 	file.VideoTracks[0].DVLevel = 6
-	req := nativeMPEGTSRequestV3()
+	req := canonicalHLSCopyRequestV3()
 	req.ClientFeatures = []string{"native_hls_separate_audio_v1", "server_dv7_to_dv81_v1"}
 	hdr := &HDRCapabilitiesV3{HDR10: true, DolbyVisionProfiles: []int{8}, DolbyVisionProfileLevels: []DolbyVisionProfileCapabilityV3{{Profile: 8, MaxLevel: 6, BLCompatibilityIDs: []int{1}}}}
 	req.Capabilities.HDRDetails = hdr
@@ -194,12 +172,12 @@ func TestNativeHLSTriesOtherNegotiatedPackaging(t *testing.T) {
 	for _, unavailable := range []bool{true, false} {
 		t.Run(strconv.FormatBool(unavailable), func(t *testing.T) {
 			file := detailedFixtureFileV3()
-			req := nativeMPEGTSRequestV3()
+			req := canonicalHLSCopyRequestV3()
 			req.ClientFeatures = append(req.ClientFeatures, ClientNativeHLSSeparateAudioV3)
 			hls := req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3]
 			hls.Features = append(hls.Features, ClientNativeHLSSeparateAudioV3)
 			req.ClientPlaybackContext.Deliveries[DeliveryClassHLSV3] = hls
-			input := PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Registry: NewTransformationRegistryV3([]TransformationSpecV3{{Name: TransformationHLSMPEGTSV3, RecipeVersion: "1", Available: true}, {Name: TransformationHLSSeparateAudioV3, RecipeVersion: "1", Available: !unavailable}})}
+			input := PlannerInputV3{Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0, Registry: NewTransformationRegistryV3([]TransformationSpecV3{{Name: TransformationHLSSeparateAudioV3, RecipeVersion: "1", Available: !unavailable}})}
 			if !unavailable {
 				first := PlanPlaybackV3(input)
 				if !PlanUsesSeparateAudioHLSV3(first.Plan) {
@@ -208,7 +186,7 @@ func TestNativeHLSTriesOtherNegotiatedPackaging(t *testing.T) {
 				input.AttemptedKeys = []string{first.Plan.PlanAttemptKey}
 			}
 			next := PlanPlaybackV3(input)
-			if !PlanUsesMPEGTSV3(next.Plan) {
+			if next.Plan == nil || !PlanCopiesVideoAsMPEGTSV3(*next.Plan) {
 				t.Fatalf("TS fallback missing: %s", ExplainPlannerResultV3(next))
 			}
 		})

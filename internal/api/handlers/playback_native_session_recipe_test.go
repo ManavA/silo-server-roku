@@ -108,7 +108,6 @@ func assertNativeRestartRequestV3(t *testing.T, recipe string, request transcode
 func newNativeHeaderAuthRestartFixtureV3(t *testing.T, recipe string) (headerAuthRestartFixtureV3, <-chan transcodenode.TranscodeStartRequest) {
 	t.Helper()
 	transformations := []playback.TransformationV3{
-		{Name: playback.TransformationHLSMPEGTSV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
 		{Name: playback.TransformationHLSSeparateAudioV3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
 		{Name: playback.TransformationServerDV7DV81V3, Executor: playback.ExecutorServerV3, RecipeVersion: "1"},
 	}
@@ -124,7 +123,7 @@ func newNativeHeaderAuthRestartFixtureV3(t *testing.T, recipe string) (headerAut
 					t.Errorf("decode executor start: %v", err)
 				}
 				starts <- request
-				writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: request.SessionID, Status: "started", CopyFMP4RecipeVersion: request.CopyFMP4RecipeVersion, AudioRecipeVersion: request.AudioRecipeVersion, ThrottleSeconds: request.ThrottleSeconds, KeyframePlaylist: request.KeyframePlaylist})
+				writeJSON(w, http.StatusAccepted, transcodenode.TranscodeStartResponse{SessionID: request.SessionID, Status: "started", CopyVideoMPEGTS: request.CopyVideoMPEGTS, CopyFMP4RecipeVersion: request.CopyFMP4RecipeVersion, AudioRecipeVersion: request.AudioRecipeVersion, ThrottleSeconds: request.ThrottleSeconds, KeyframePlaylist: request.KeyframePlaylist})
 			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/transcode/"):
 				_, _ = io.WriteString(w, "#EXTM3U\n#EXTINF:6,\nseg_00001.ts\n")
 			default:
@@ -162,13 +161,13 @@ func newNativeHeaderAuthRestartFixtureV3(t *testing.T, recipe string) (headerAut
 		h.NodePlanner, h.PlanStoreV3, h.SessionRecipeStore, h.NodeRecipeStore = planner, f.attempts, f.recipes, nodeRecipes
 		requireWorkerRoutingV3(h)
 		h.v3RegistryTranscodeEnabled = h.playbackConfig().TranscodeEnabled
-		h.v3Registry = playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{Name: playback.TransformationHLSMPEGTSV3, RecipeVersion: "1", Available: true}, {Name: playback.TransformationHLSSeparateAudioV3, RecipeVersion: "1", Available: true}, {Name: playback.TransformationServerDV7DV81V3, RecipeVersion: "1", Available: true}})
+		h.v3Registry = playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{Name: playback.TransformationHLSSeparateAudioV3, RecipeVersion: "1", Available: true}, {Name: playback.TransformationServerDV7DV81V3, RecipeVersion: "1", Available: true}})
 	}
 	h := f.restart()
 	start := v3HandlerStartRequest()
 	audioIndex := 1
 	start.AudioTrackIndex = &audioIndex
-	feature := playback.ClientNativeHLSMPEGTSV3
+	feature := playback.FeatureHLSCopyMPEGTSV3
 	if recipe != "mpegts" {
 		feature = playback.ClientNativeHLSSeparateAudioV3
 	}

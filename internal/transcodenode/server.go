@@ -66,6 +66,7 @@ type TranscodeStartRequest struct {
 	ToneMapDVRPUPresent        bool                   `json:"tone_map_dv_rpu_present,omitempty"`
 	VideoBitstreamFilter       string                 `json:"video_bitstream_filter,omitempty"`
 	VideoSampleEntry           string                 `json:"video_sample_entry,omitempty"`
+	VideoRange                 string                 `json:"video_range,omitempty"`
 	CopyVideoMPEGTS            bool                   `json:"copy_video_mpegts,omitempty"`
 	SeparateAudioHLS           bool                   `json:"separate_audio_hls,omitempty"`
 	DV7ToDV81                  bool                   `json:"dv7_to_dv81,omitempty"`
@@ -90,7 +91,8 @@ type TranscodeStartRequest struct {
 	SubtitleCodec              string                 `json:"subtitle_codec,omitempty"`
 	// SubtitleRendition asks the executor to emit the selected text track as
 	// the playlist's WebVTT subtitle rendition. Only nodes advertising
-	// playback.TransportFeatureHLSSubtitleRenditionV1 receive it.
+	// playback.HLSSubtitleRenditionTransportFeatureV3 for the video target
+	// receive it.
 	SubtitleRendition bool    `json:"subtitle_rendition,omitempty"`
 	TotalDuration     float64 `json:"total_duration"`
 	RequireReady      bool    `json:"require_ready,omitempty"`
@@ -134,8 +136,13 @@ type TranscodeStartResponse struct {
 	KeyframePlaylist bool `json:"keyframe_playlist,omitempty"`
 	// SubtitleRendition attests that the executor emits the requested subtitle
 	// rendition. Older nodes omit it and are rejected before the plan
-	// promises a rendition their playlist does not carry.
+	// promises a rendition their playlist does not carry; nodes that predate
+	// remux renditions omit it for a copy remux.
 	SubtitleRendition bool `json:"subtitle_rendition,omitempty"`
+	// CopyVideoMPEGTS attests that the executor packages the requested copy
+	// remux as MPEG-TS. Older nodes omit it and are rejected before an fMP4
+	// stream is published under a plan that promises MPEG-TS.
+	CopyVideoMPEGTS bool `json:"copy_video_mpegts,omitempty"`
 }
 
 var ErrAudioRecipeAttestationMismatch = errors.New("transcode node audio recipe attestation mismatch")
@@ -204,6 +211,20 @@ func ValidateCopyFMP4RecipeAttestation(req TranscodeStartRequest, response Trans
 func ValidateKeyframePlaylistAttestation(req TranscodeStartRequest, response TranscodeStartResponse) error {
 	if req.KeyframePlaylist && !response.KeyframePlaylist {
 		return ErrKeyframePlaylistAttestationMismatch
+	}
+	return nil
+}
+
+// ErrCopyVideoMPEGTSAttestationMismatch reports an executor that ignored
+// requested MPEG-TS copy packaging.
+var ErrCopyVideoMPEGTSAttestationMismatch = errors.New("transcode node mpeg-ts copy attestation mismatch")
+
+// ValidateCopyVideoMPEGTSAttestation rejects an executor that silently
+// packaged a requested MPEG-TS copy remux as fMP4. Requests without it stay
+// compatible with older nodes, which omit the field.
+func ValidateCopyVideoMPEGTSAttestation(req TranscodeStartRequest, response TranscodeStartResponse) error {
+	if req.CopyVideoMPEGTS && !response.CopyVideoMPEGTS {
+		return ErrCopyVideoMPEGTSAttestationMismatch
 	}
 	return nil
 }
@@ -1527,7 +1548,7 @@ func (s *Server) buildCapabilitySnapshotLocked(ctx context.Context) (playback.HW
 	}
 	info.TransportFeatures = append(info.TransportFeatures, playback.TransportFeaturePreparedTracksV1,
 		playback.TransportFeatureTrickplayExtractV1, playback.TransportFeatureTrickplayExtractV2,
-		playback.TransportFeatureHLSSubtitleRenditionV1)
+		playback.TransportFeatureHLSSubtitleRenditionV1, playback.TransportFeatureHLSRemuxSubtitleRenditionV1)
 	info.CapabilityHash = playback.ComputeCapabilityHash(info)
 	return info, nil
 }
@@ -1760,6 +1781,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		ToneMapDVRPUPresent:        req.ToneMapDVRPUPresent,
 		VideoBitstreamFilter:       req.VideoBitstreamFilter,
 		VideoSampleEntry:           req.VideoSampleEntry,
+		VideoRange:                 req.VideoRange,
 		CopyVideoMPEGTS:            req.CopyVideoMPEGTS,
 		SeparateAudioHLS:           req.SeparateAudioHLS,
 		DV7ToDV81:                  req.DV7ToDV81,
@@ -1955,6 +1977,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		SoftwareVideoDecode:   session.Opts().SoftwareVideoDecode,
 		KeyframePlaylist:      session.Opts().KeyframePlaylist,
 		SubtitleRendition:     session.HasSubtitleRendition(),
+		CopyVideoMPEGTS:       session.Opts().CopyVideoMPEGTS,
 	})
 }
 
@@ -2856,6 +2879,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "manifest not ready", http.StatusServiceUnavailable)
 		return
 	}
+	playback.WarnIfPlaylistOversized(r.Context(), "transcodenode", sessionID, manifest)
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-store, no-transform, max-age=0")

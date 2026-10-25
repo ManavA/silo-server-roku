@@ -356,16 +356,17 @@ func TestHLSPlanningCapabilitiesV3RespectWorkloadExecutionPolicy(t *testing.T) {
 
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.NodePlanner = enumeratingNodePlannerV3{urls: []string{remote.URL}}
-	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
-		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
-		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
-	}))
+
 	policy := config.DefaultPlaybackRoutingPolicy()
 	policy.RemuxExecution = config.PlaybackExecutionAPIOnly
 	policy.VideoTranscodeExecution = config.PlaybackExecutionWorkerOnly
 	handler.PlaybackConfig = func() config.PlaybackConfig {
 		return config.PlaybackConfig{Routing: policy}
 	}
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{
+		{Name: playback.TransformationAudioToAACV3, RecipeVersion: playback.TransformationAudioToAACRecipeVersionV3, Available: true},
+		{Name: playback.TransformationVideoToH264V3, RecipeVersion: playback.TransformationVideoToH264RecipeVersionV3, Available: true},
+	}))
 
 	remuxRegistry := handler.hlsPlanningRegistryWithInputsForWorkloadV3(
 		t.Context(), playback.PlannerSettingsV3{}, hlsToneMapCapabilityInventoryV3{}, noderouting.WorkloadRemux,

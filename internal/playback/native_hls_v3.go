@@ -17,26 +17,13 @@ const (
 	videoRangeDOVIWithHDR10  = "DOVIWithHDR10"
 )
 
-// PlanUsesMPEGTSV3 reports the frozen HLS packaging recipe.
-func PlanUsesMPEGTSV3(plan *PlanV3) bool {
-	if plan == nil || plan.Delivery != DeliveryRemuxHLSV3 {
-		return false
-	}
-	for _, transformation := range plan.Transformations {
-		if transformation.Executor == ExecutorServerV3 && transformation.Name == TransformationHLSMPEGTSV3 && transformation.RecipeVersion == TransformationHLSMPEGTSRecipeVersionV3 {
-			return true
-		}
-	}
-	return false
-}
-
 func nativeHLSPackagingV3(request StartRequestV3) string {
 	return nativeHLSPackagingCandidatesV3(request)[0]
 }
 
 func nativeHLSPackagingCandidatesV3(request StartRequestV3) []string {
 	var candidates []string
-	for _, recipe := range []struct{ feature, name string }{{ClientNativeHLSSeparateAudioV3, TransformationHLSSeparateAudioV3}, {ClientNativeHLSMPEGTSV3, TransformationHLSMPEGTSV3}} {
+	for _, recipe := range []struct{ feature, name string }{{ClientNativeHLSSeparateAudioV3, TransformationHLSSeparateAudioV3}} {
 		if HasFeatureV3(request.ClientFeatures, recipe.feature) && deliverySupportsFeatureV3(request, DeliveryClassHLSV3, recipe.feature) {
 			candidates = append(candidates, recipe.name)
 		}
@@ -44,7 +31,7 @@ func nativeHLSPackagingCandidatesV3(request StartRequestV3) []string {
 	if len(candidates) == 0 {
 		return []string{""}
 	}
-	return candidates
+	return append(candidates, "")
 }
 
 // PlanUsesSeparateAudioHLSV3 reports the frozen audio rendition recipe.
