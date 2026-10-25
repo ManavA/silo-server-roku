@@ -105,3 +105,16 @@ printf '%s' '{"format":{"start_time":"0"},"streams":[{"index":0,"codec_type":"vi
 		t.Fatal("two stream probes exceeded the shared caller deadline")
 	}
 }
+
+func TestSeparateAudioTimestampAllowsSlowStorage(t *testing.T) {
+	ffmpeg := timestampProbeFixture(t, `sleep 1.6
+printf '%s' '{"format":{"start_time":"0"},"streams":[{"index":0,"codec_type":"video"},{"index":1,"codec_type":"audio","sample_rate":"48000"}],"packets":[{"stream_index":0,"dts_time":"-0.08"},{"stream_index":1,"dts_time":"0"}]}'
+`)
+	got, err := prepareSeparateAudioTimestampOffset(t.Context(), TranscodeOpts{SeparateAudioHLS: true, FFmpegPath: ffmpeg, InputPath: "synthetic.mkv", TargetCodecAudio: "copy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(got.separateAudioTimestampOffset-0.08) > 0.000001 {
+		t.Fatalf("offset=%v, want 0.08", got.separateAudioTimestampOffset)
+	}
+}

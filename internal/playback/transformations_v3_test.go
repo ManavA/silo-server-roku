@@ -146,6 +146,9 @@ func TestDVConversionProbeRequiresTranscoding(t *testing.T) {
 			if (err == nil) != enabled {
 				t.Fatalf("conversion probe ran=%v with transcoding=%v", err == nil, enabled)
 			}
+			if !enabled && registry.NeedsRefresh(time.Now().Add(time.Hour)) {
+				t.Fatal("unchanged disabled policy should stay cached")
+			}
 			if !enabled && registry.Available(TransformationServerDV7DV81V3) {
 				t.Fatal("disabled conversion was advertised")
 			}

@@ -333,18 +333,20 @@ func (h *PlaybackHandler) transformationRegistryV3(ctx context.Context) *playbac
 func (h *PlaybackHandler) probedTransformationRegistryV3(ctx context.Context) (*playback.TransformationRegistryV3, error) {
 	h.v3RegistryMu.Lock()
 	defer h.v3RegistryMu.Unlock()
-	if !h.v3Registry.NeedsRefresh(time.Now()) {
+	cfg := h.playbackConfig()
+	if !h.v3Registry.NeedsRefresh(time.Now()) && h.v3RegistryTranscodeEnabled == cfg.TranscodeEnabled {
 		return h.v3Registry, nil
 	}
 	probe := func(ctx context.Context, path string, caps tonemap.Capabilities) (*playback.TransformationRegistryV3, error) {
-		return playback.ProbeTransformationRegistryWithPlaybackPolicyV3Result(ctx, path, caps, h.playbackConfig().TranscodeEnabled)
+		return playback.ProbeTransformationRegistryWithPlaybackPolicyV3Result(ctx, path, caps, cfg.TranscodeEnabled)
 	}
 	if h.v3RegistryProbe != nil {
 		probe = h.v3RegistryProbe
 	}
-	registry, err := probe(context.WithoutCancel(ctx), h.playbackConfig().FFmpegPath, nil)
+	registry, err := probe(context.WithoutCancel(ctx), cfg.FFmpegPath, nil)
 	if err == nil {
 		h.v3Registry = registry
+		h.v3RegistryTranscodeEnabled = cfg.TranscodeEnabled
 	}
 	return registry, err
 }
@@ -4024,7 +4026,7 @@ func (h *PlaybackHandler) startReadyAutoLocalPlaybackTransportV3(ctx context.Con
 func (h *PlaybackHandler) prepareLocalTransportV3(r *http.Request, session *playback.Session, file *models.MediaFile, result playback.PlannerResultV3, timeline preparedTimelineV3, mode mediaAuthModeV3) (preparedTransportV3, *transportErrorV3) {
 	cfg := h.playbackConfig()
 	if playback.PlanConvertsDV7ToDV81V3(result.Plan) && !cfg.TranscodeEnabled {
-		return preparedTransportV3{}, &transportErrorV3{reason: "transcode_disabled", message: "Transcoding is disabled."}
+		return preparedTransportV3{}, &transportErrorV3{reason: "local_transcode_disabled", message: "Transcoding is disabled."}
 	}
 	if err := os.MkdirAll(cfg.TranscodeDir, 0o755); err != nil {
 		return preparedTransportV3{}, &transportErrorV3{reason: "internal_error", message: "Failed to prepare the transcode directory.", cause: err}
