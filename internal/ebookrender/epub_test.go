@@ -204,6 +204,21 @@ func TestAllHeadingLevelsKeepTextSeparate(t *testing.T) {
 	}
 }
 
+func TestBlockquoteKeepsSurroundingTextSeparate(t *testing.T) {
+	for _, quote := range []string{"Quoted", "<p>Quoted</p>"} {
+		t.Run(quote, func(t *testing.T) {
+			data := epub(t, map[string]string{"OPS/one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><body>Before<blockquote>` + quote + `</blockquote>After</body></html>`})
+			book, err := ebookrender.Parse(t.Context(), bytes.NewReader(data), int64(len(data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if book.Chapters[0].Text != "Before\nQuoted\nAfter" {
+				t.Fatalf("blockquote merged: %q", book.Chapters[0].Text)
+			}
+		})
+	}
+}
+
 func TestRejectAmbiguousEndRecordInsideZIPComment(t *testing.T) {
 	inner := epub(t, nil)
 	original := epub(t, nil)

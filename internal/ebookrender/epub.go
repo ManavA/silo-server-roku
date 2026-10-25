@@ -553,7 +553,7 @@ func withContext(ctx context.Context, reader io.Reader) io.Reader {
 
 func blockElement(name string) bool {
 	switch name {
-	case "p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "section":
+	case "p", "div", "blockquote", "li", "h1", "h2", "h3", "h4", "h5", "h6", "section":
 		return true
 	default:
 		return false
