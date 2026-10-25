@@ -54,11 +54,7 @@ func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegP
 // ProbeTransformationRegistryWithPlaybackPolicyV3Result admits conversion smoke
 // tests only when the caller's existing playback policy permits transcoding.
 func ProbeTransformationRegistryWithPlaybackPolicyV3Result(ctx context.Context, ffmpegPath string, toneMapCapabilities tonemap.Capabilities, transcodeEnabled bool) (*TransformationRegistryV3, error) {
-	registry, err := probeTransformationRegistryWithPlaybackPolicyV3Result(ctx, ffmpegPath, toneMapCapabilities, transcodeEnabled)
-	if !transcodeEnabled {
-		registry.refreshAfter = time.Now().Add(transformationProbeRetryDelayV3)
-	}
-	return registry, err
+	return probeTransformationRegistryWithPlaybackPolicyV3Result(ctx, ffmpegPath, toneMapCapabilities, transcodeEnabled)
 }
 
 func probeTransformationRegistryWithPlaybackPolicyV3Result(ctx context.Context, ffmpegPath string, toneMapCapabilities tonemap.Capabilities, transcodeEnabled bool) (*TransformationRegistryV3, error) {

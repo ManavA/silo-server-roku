@@ -161,6 +161,7 @@ func newNativeHeaderAuthRestartFixtureV3(t *testing.T, recipe string) (headerAut
 		h.PlaybackConfig = playbackTestConfig(ffmpeg, output)
 		h.NodePlanner, h.PlanStoreV3, h.SessionRecipeStore, h.NodeRecipeStore = planner, f.attempts, f.recipes, nodeRecipes
 		requireWorkerRoutingV3(h)
+		h.v3RegistryTranscodeEnabled = h.playbackConfig().TranscodeEnabled
 		h.v3Registry = playback.NewTransformationRegistryV3([]playback.TransformationSpecV3{{Name: playback.TransformationHLSMPEGTSV3, RecipeVersion: "1", Available: true}, {Name: playback.TransformationHLSSeparateAudioV3, RecipeVersion: "1", Available: true}, {Name: playback.TransformationServerDV7DV81V3, RecipeVersion: "1", Available: true}})
 	}
 	h := f.restart()

@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 	"unicode"
 )
 
@@ -117,7 +116,7 @@ func prepareSeparateAudioTimestampOffset(ctx context.Context, opts TranscodeOpts
 	if !opts.SeparateAudioHLS {
 		return opts, nil
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, ManifestStartupTimeout)
 	defer cancel()
 	interval := "%+#128"
 	if opts.SeekSeconds > 0 {
